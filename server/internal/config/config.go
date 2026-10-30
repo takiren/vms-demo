@@ -76,12 +76,44 @@ func (d DatabaseURL) Value() string {
 	return d.u.String()
 }
 
-// String returns the URL with the password replaced.
+// String returns the URL with the password replaced, both in the userinfo
+// and in query parameters (libpq and pgx also accept ?password=... and
+// ?sslpassword=...).
 func (d DatabaseURL) String() string {
 	if d.u == nil {
 		return ""
 	}
-	return d.u.Redacted()
+	u := *d.u
+	if u.RawQuery != "" {
+		q, err := url.ParseQuery(u.RawQuery)
+		if err != nil {
+			// Cannot tell which parts are secret: hide the whole query.
+			u.RawQuery = redactedValue
+		} else {
+			for name := range q {
+				if isSecretParam(name) {
+					q[name] = []string{redactedValue}
+				}
+			}
+			u.RawQuery = q.Encode()
+		}
+	}
+	return u.Redacted()
+}
+
+// redactedValue matches what url.URL.Redacted puts in place of the password.
+const redactedValue = "xxxxx"
+
+// isSecretParam reports whether a connection URL query parameter may carry a
+// secret. It errs on the side of hiding.
+func isSecretParam(name string) bool {
+	n := strings.ToLower(name)
+	for _, s := range []string{"password", "secret", "token"} {
+		if strings.Contains(n, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // GoString hides the password from %#v.

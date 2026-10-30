@@ -166,3 +166,43 @@ func TestSecretKeyBytesIsACopy(t *testing.T) {
 		t.Error("mutating Bytes() changed the key")
 	}
 }
+
+func TestDatabaseURLRedactsQueryParams(t *testing.T) {
+	tests := []struct {
+		name, url string
+		keep      []string
+	}{
+		{"password param", "postgres://vms@db:5432/vms?sslmode=require&password=" + testPassword, []string{"sslmode=require", "password=xxxxx"}},
+		{"sslpassword param", "postgres://vms@db:5432/vms?sslpassword=" + testPassword + "&sslkey=%2Fk.pem", []string{"sslpassword=xxxxx", "sslkey=%2Fk.pem"}},
+		{"case-insensitive", "postgres://vms@db:5432/vms?PassWord=" + testPassword, []string{"PassWord=xxxxx"}},
+		{"userinfo and param", "postgres://vms:" + testPassword + "@db:5432/vms?password=" + testPassword, []string{"vms:xxxxx@db", "password=xxxxx"}},
+		{"unparsable query", "postgres://vms@db:5432/vms?password=" + testPassword + "%zz", []string{"?xxxxx"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.Load(env(map[string]string{config.EnvDatabaseURL: tt.url}))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.DatabaseURL.Value() != tt.url {
+				t.Errorf("Value() = %q, want the original URL", cfg.DatabaseURL.Value())
+			}
+			var buf bytes.Buffer
+			slog.New(slog.NewJSONHandler(&buf, nil)).Info("cfg", slog.Any("config", cfg))
+			for name, out := range map[string]string{
+				"String": cfg.DatabaseURL.String(),
+				"%#v":    fmt.Sprintf("%#v", cfg),
+				"slog":   buf.String(),
+			} {
+				if strings.Contains(out, testPassword) {
+					t.Errorf("%s leaks the password: %s", name, out)
+				}
+			}
+			for _, k := range tt.keep {
+				if !strings.Contains(cfg.DatabaseURL.String(), k) {
+					t.Errorf("String() = %q, want it to contain %q", cfg.DatabaseURL.String(), k)
+				}
+			}
+		})
+	}
+}
