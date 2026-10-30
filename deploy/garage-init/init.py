@@ -31,7 +31,8 @@ BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(:[0-9]{1,5})?$")
 # ブラウザが録画のセグメント（presigned URL）を取得するのに要るもの
 CORS_METHODS = ["GET", "HEAD"]
-CORS_ALLOWED_HEADERS = ["Range", "If-None-Match", "If-Modified-Since"]
+# Garage は preflight の Access-Control-Request-Headers を小文字にして照合するので、小文字で書く
+CORS_ALLOWED_HEADERS = ["range", "if-none-match", "if-modified-since"]
 CORS_EXPOSE_HEADERS = ["Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"]
 CORS_MAX_AGE = 3600
 

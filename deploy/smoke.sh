@@ -70,7 +70,8 @@ ccurl -o /dev/null -X DELETE "$(python3 deploy/smoke/presign.py DELETE "$obj")"
 echo "== CORS"
 cors() { ccurl -o /dev/null -D - -X OPTIONS -H "Origin: $1" -H 'Access-Control-Request-Method: GET' \
   -H 'Access-Control-Request-Headers: range' "$s3/$S3_BUCKET/x.mp4" | tr -d '\r'; }
-cors "https://$host" | grep -qi "^access-control-allow-origin: https://$host$" || fail "CORS: own origin not allowed"
+cors "https://$host" > "$tmp/cors.txt"
+grep -qi "^access-control-allow-origin: https://$host$" "$tmp/cors.txt" || { cat "$tmp/cors.txt"; fail "CORS: own origin not allowed"; }
 if cors "https://evil.example" | grep -qi '^access-control-allow-origin'; then fail "CORS: foreign origin allowed"; fi
 
 echo "== Caddy: /api"
