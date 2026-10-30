@@ -14,9 +14,12 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/labstack/echo/v5"
+	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
 // Defines values for ErrorCode.
@@ -79,6 +82,32 @@ func (e HealthStatus) Valid() bool {
 	}
 }
 
+// Defines values for Role.
+const (
+	RoleAdmin  Role = "admin"
+	RoleViewer Role = "viewer"
+)
+
+// Valid indicates whether the value is a known member of the Role enum.
+func (e Role) Valid() bool {
+	switch e {
+	case RoleAdmin:
+		return true
+	case RoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
+// ChangePasswordRequest defines model for ChangePasswordRequest.
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+
+	// NewPassword Unicode のコードポイントで 12 文字以上 128 文字以下。文字種の条件はない。
+	NewPassword NewPassword `json:"new_password"`
+}
+
 // Error defines model for Error.
 type Error struct {
 	Error ErrorBody `json:"error"`
@@ -104,16 +133,150 @@ type Health struct {
 // HealthStatus defines model for Health.Status.
 type HealthStatus string
 
+// LoginRequest defines model for LoginRequest.
+type LoginRequest struct {
+	Password string `json:"password"`
+
+	// Username ASCII の英数字と `.` `_` `-`。大文字小文字を区別せずに一意
+	Username Username `json:"username"`
+}
+
+// NewPassword Unicode のコードポイントで 12 文字以上 128 文字以下。文字種の条件はない。
+type NewPassword = string
+
+// Role admin は全操作、viewer は閲覧だけ
+type Role string
+
+// User defines model for User.
+type User struct {
+	CreatedAt time.Time          `json:"created_at"`
+	Id        openapi_types.UUID `json:"id"`
+
+	// Role admin は全操作、viewer は閲覧だけ
+	Role      Role      `json:"role"`
+	UpdatedAt time.Time `json:"updated_at"`
+
+	// Username ASCII の英数字と `.` `_` `-`。大文字小文字を区別せずに一意
+	Username Username `json:"username"`
+}
+
+// UserCreate defines model for UserCreate.
+type UserCreate struct {
+	// Password Unicode のコードポイントで 12 文字以上 128 文字以下。文字種の条件はない。
+	Password NewPassword `json:"password"`
+
+	// Role admin は全操作、viewer は閲覧だけ
+	Role Role `json:"role"`
+
+	// Username ASCII の英数字と `.` `_` `-`。大文字小文字を区別せずに一意
+	Username Username `json:"username"`
+}
+
+// UserList defines model for UserList.
+type UserList struct {
+	Users []User `json:"users"`
+}
+
+// UserUpdate defines model for UserUpdate.
+type UserUpdate struct {
+	// Password Unicode のコードポイントで 12 文字以上 128 文字以下。文字種の条件はない。
+	Password *NewPassword `json:"password,omitempty"`
+
+	// Role admin は全操作、viewer は閲覧だけ
+	Role *Role `json:"role,omitempty"`
+}
+
+// Username ASCII の英数字と `.` `_` `-`。大文字小文字を区別せずに一意
+type Username = string
+
+// UserID defines model for UserID.
+type UserID = openapi_types.UUID
+
+// LoginJSONRequestBody defines body for Login for application/json ContentType.
+type LoginJSONRequestBody = LoginRequest
+
+// ChangeOwnPasswordJSONRequestBody defines body for ChangeOwnPassword for application/json ContentType.
+type ChangeOwnPasswordJSONRequestBody = ChangePasswordRequest
+
+// CreateUserJSONRequestBody defines body for CreateUser for application/json ContentType.
+type CreateUserJSONRequestBody = UserCreate
+
+// UpdateUserJSONRequestBody defines body for UpdateUser for application/json ContentType.
+type UpdateUserJSONRequestBody = UserUpdate
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// Login ログイン
+	// (POST /auth/login)
+	Login(ctx *echo.Context) error
+	// Logout ログアウト
+	// (POST /auth/logout)
+	Logout(ctx *echo.Context) error
+	// GetMe ログイン中のユーザー
+	// (GET /auth/me)
+	GetMe(ctx *echo.Context) error
+	// ChangeOwnPassword 自分のパスワードを変える
+	// (POST /auth/password)
+	ChangeOwnPassword(ctx *echo.Context) error
 	// GetHealthz API プロセスの死活確認
 	// (GET /healthz)
 	GetHealthz(ctx *echo.Context) error
+	// ListUsers ユーザーの一覧
+	// (GET /users)
+	ListUsers(ctx *echo.Context) error
+	// CreateUser ユーザーを作る
+	// (POST /users)
+	CreateUser(ctx *echo.Context) error
+	// DeleteUser ユーザーを削除する
+	// (DELETE /users/{id})
+	DeleteUser(ctx *echo.Context, id UserID) error
+	// GetUser ユーザーを取得する
+	// (GET /users/{id})
+	GetUser(ctx *echo.Context, id UserID) error
+	// UpdateUser ユーザーのロールやパスワードを変える
+	// (PATCH /users/{id})
+	UpdateUser(ctx *echo.Context, id UserID) error
 }
 
 // ServerInterfaceWrapper converts echo contexts to parameters.
 type ServerInterfaceWrapper struct {
 	Handler ServerInterface
+}
+
+// Login converts echo context to params.
+func (w *ServerInterfaceWrapper) Login(ctx *echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.Login(ctx)
+	return err
+}
+
+// Logout converts echo context to params.
+func (w *ServerInterfaceWrapper) Logout(ctx *echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.Logout(ctx)
+	return err
+}
+
+// GetMe converts echo context to params.
+func (w *ServerInterfaceWrapper) GetMe(ctx *echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.GetMe(ctx)
+	return err
+}
+
+// ChangeOwnPassword converts echo context to params.
+func (w *ServerInterfaceWrapper) ChangeOwnPassword(ctx *echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.ChangeOwnPassword(ctx)
+	return err
 }
 
 // GetHealthz converts echo context to params.
@@ -122,6 +285,72 @@ func (w *ServerInterfaceWrapper) GetHealthz(ctx *echo.Context) error {
 
 	// Invoke the callback with all the unmarshaled arguments
 	err = w.Handler.GetHealthz(ctx)
+	return err
+}
+
+// ListUsers converts echo context to params.
+func (w *ServerInterfaceWrapper) ListUsers(ctx *echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.ListUsers(ctx)
+	return err
+}
+
+// CreateUser converts echo context to params.
+func (w *ServerInterfaceWrapper) CreateUser(ctx *echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.CreateUser(ctx)
+	return err
+}
+
+// DeleteUser converts echo context to params.
+func (w *ServerInterfaceWrapper) DeleteUser(ctx *echo.Context) error {
+	var err error
+	// ------------- Path parameter "id" -------------
+	var id UserID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", ctx.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: ctx.Request().URL.RawPath == ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.DeleteUser(ctx, id)
+	return err
+}
+
+// GetUser converts echo context to params.
+func (w *ServerInterfaceWrapper) GetUser(ctx *echo.Context) error {
+	var err error
+	// ------------- Path parameter "id" -------------
+	var id UserID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", ctx.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: ctx.Request().URL.RawPath == ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.GetUser(ctx, id)
+	return err
+}
+
+// UpdateUser converts echo context to params.
+func (w *ServerInterfaceWrapper) UpdateUser(ctx *echo.Context) error {
+	var err error
+	// ------------- Path parameter "id" -------------
+	var id UserID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", ctx.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: ctx.Request().URL.RawPath == ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.UpdateUser(ctx, id)
 	return err
 }
 
@@ -173,10 +402,225 @@ func RegisterHandlersWithOptions(router EchoRouter, si ServerInterface, options 
 	}
 
 	router.GET(options.BaseURL+"/healthz", wrapper.GetHealthz, options.OperationMiddlewares["getHealthz"]...)
+	router.POST(options.BaseURL+"/auth/login", wrapper.Login, options.OperationMiddlewares["login"]...)
+	router.POST(options.BaseURL+"/auth/logout", wrapper.Logout, options.OperationMiddlewares["logout"]...)
+	router.GET(options.BaseURL+"/auth/me", wrapper.GetMe, options.OperationMiddlewares["getMe"]...)
+	router.POST(options.BaseURL+"/auth/password", wrapper.ChangeOwnPassword, options.OperationMiddlewares["changeOwnPassword"]...)
+	router.GET(options.BaseURL+"/users", wrapper.ListUsers, options.OperationMiddlewares["listUsers"]...)
+	router.POST(options.BaseURL+"/users", wrapper.CreateUser, options.OperationMiddlewares["createUser"]...)
+	router.DELETE(options.BaseURL+"/users/:id", wrapper.DeleteUser, options.OperationMiddlewares["deleteUser"]...)
+	router.GET(options.BaseURL+"/users/:id", wrapper.GetUser, options.OperationMiddlewares["getUser"]...)
+	router.PATCH(options.BaseURL+"/users/:id", wrapper.UpdateUser, options.OperationMiddlewares["updateUser"]...)
 
 }
 
 type ErrorJSONResponse Error
+
+type LoginRequestObject struct {
+	Body *LoginJSONRequestBody
+}
+
+type LoginResponseObject interface {
+	VisitLoginResponse(w http.ResponseWriter) error
+}
+
+type Login200ResponseHeaders struct {
+	SetCookie string
+}
+
+type Login200JSONResponse struct {
+	Body    User
+	Headers Login200ResponseHeaders
+}
+
+func (response Login200JSONResponse) VisitLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Set-Cookie", fmt.Sprint(response.Headers.SetCookie))
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type Login429ResponseHeaders struct {
+	RetryAfter int
+}
+
+type Login429JSONResponse struct {
+	Body    Error
+	Headers Login429ResponseHeaders
+}
+
+func (response Login429JSONResponse) VisitLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", fmt.Sprint(response.Headers.RetryAfter))
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type LogindefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response LogindefaultJSONResponse) VisitLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type LogoutRequestObject struct {
+}
+
+type LogoutResponseObject interface {
+	VisitLogoutResponse(w http.ResponseWriter) error
+}
+
+type Logout204ResponseHeaders struct {
+	SetCookie string
+}
+
+type Logout204Response struct {
+	Headers Logout204ResponseHeaders
+}
+
+func (response Logout204Response) VisitLogoutResponse(w http.ResponseWriter) error {
+	w.Header().Set("Set-Cookie", fmt.Sprint(response.Headers.SetCookie))
+	w.WriteHeader(204)
+	return nil
+}
+
+type LogoutdefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response LogoutdefaultJSONResponse) VisitLogoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetMeRequestObject struct {
+}
+
+type GetMeResponseObject interface {
+	VisitGetMeResponse(w http.ResponseWriter) error
+}
+
+type GetMe200JSONResponse User
+
+func (response GetMe200JSONResponse) VisitGetMeResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetMedefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response GetMedefaultJSONResponse) VisitGetMeResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ChangeOwnPasswordRequestObject struct {
+	Body *ChangeOwnPasswordJSONRequestBody
+}
+
+type ChangeOwnPasswordResponseObject interface {
+	VisitChangeOwnPasswordResponse(w http.ResponseWriter) error
+}
+
+type ChangeOwnPassword204ResponseHeaders struct {
+	SetCookie string
+}
+
+type ChangeOwnPassword204Response struct {
+	Headers ChangeOwnPassword204ResponseHeaders
+}
+
+func (response ChangeOwnPassword204Response) VisitChangeOwnPasswordResponse(w http.ResponseWriter) error {
+	w.Header().Set("Set-Cookie", fmt.Sprint(response.Headers.SetCookie))
+	w.WriteHeader(204)
+	return nil
+}
+
+type ChangeOwnPassword429ResponseHeaders struct {
+	RetryAfter int
+}
+
+type ChangeOwnPassword429JSONResponse struct {
+	Body    Error
+	Headers ChangeOwnPassword429ResponseHeaders
+}
+
+func (response ChangeOwnPassword429JSONResponse) VisitChangeOwnPasswordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", fmt.Sprint(response.Headers.RetryAfter))
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ChangeOwnPassworddefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response ChangeOwnPassworddefaultJSONResponse) VisitChangeOwnPasswordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
 
 type GetHealthzRequestObject struct {
 }
@@ -216,11 +660,227 @@ func (response GetHealthzdefaultJSONResponse) VisitGetHealthzResponse(w http.Res
 	return err
 }
 
+type ListUsersRequestObject struct {
+}
+
+type ListUsersResponseObject interface {
+	VisitListUsersResponse(w http.ResponseWriter) error
+}
+
+type ListUsers200JSONResponse UserList
+
+func (response ListUsers200JSONResponse) VisitListUsersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListUsersdefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response ListUsersdefaultJSONResponse) VisitListUsersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateUserRequestObject struct {
+	Body *CreateUserJSONRequestBody
+}
+
+type CreateUserResponseObject interface {
+	VisitCreateUserResponse(w http.ResponseWriter) error
+}
+
+type CreateUser201JSONResponse User
+
+func (response CreateUser201JSONResponse) VisitCreateUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateUserdefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response CreateUserdefaultJSONResponse) VisitCreateUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteUserRequestObject struct {
+	Id UserID `json:"id"`
+}
+
+type DeleteUserResponseObject interface {
+	VisitDeleteUserResponse(w http.ResponseWriter) error
+}
+
+type DeleteUser204Response struct {
+}
+
+func (response DeleteUser204Response) VisitDeleteUserResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteUserdefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response DeleteUserdefaultJSONResponse) VisitDeleteUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUserRequestObject struct {
+	Id UserID `json:"id"`
+}
+
+type GetUserResponseObject interface {
+	VisitGetUserResponse(w http.ResponseWriter) error
+}
+
+type GetUser200JSONResponse User
+
+func (response GetUser200JSONResponse) VisitGetUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUserdefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response GetUserdefaultJSONResponse) VisitGetUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateUserRequestObject struct {
+	Id   UserID `json:"id"`
+	Body *UpdateUserJSONRequestBody
+}
+
+type UpdateUserResponseObject interface {
+	VisitUpdateUserResponse(w http.ResponseWriter) error
+}
+
+type UpdateUser200JSONResponse User
+
+func (response UpdateUser200JSONResponse) VisitUpdateUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateUserdefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response UpdateUserdefaultJSONResponse) VisitUpdateUserResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// Login ログイン
+	// (POST /auth/login)
+	Login(ctx context.Context, request LoginRequestObject) (LoginResponseObject, error)
+	// Logout ログアウト
+	// (POST /auth/logout)
+	Logout(ctx context.Context, request LogoutRequestObject) (LogoutResponseObject, error)
+	// GetMe ログイン中のユーザー
+	// (GET /auth/me)
+	GetMe(ctx context.Context, request GetMeRequestObject) (GetMeResponseObject, error)
+	// ChangeOwnPassword 自分のパスワードを変える
+	// (POST /auth/password)
+	ChangeOwnPassword(ctx context.Context, request ChangeOwnPasswordRequestObject) (ChangeOwnPasswordResponseObject, error)
 	// GetHealthz API プロセスの死活確認
 	// (GET /healthz)
 	GetHealthz(ctx context.Context, request GetHealthzRequestObject) (GetHealthzResponseObject, error)
+	// ListUsers ユーザーの一覧
+	// (GET /users)
+	ListUsers(ctx context.Context, request ListUsersRequestObject) (ListUsersResponseObject, error)
+	// CreateUser ユーザーを作る
+	// (POST /users)
+	CreateUser(ctx context.Context, request CreateUserRequestObject) (CreateUserResponseObject, error)
+	// DeleteUser ユーザーを削除する
+	// (DELETE /users/{id})
+	DeleteUser(ctx context.Context, request DeleteUserRequestObject) (DeleteUserResponseObject, error)
+	// GetUser ユーザーを取得する
+	// (GET /users/{id})
+	GetUser(ctx context.Context, request GetUserRequestObject) (GetUserResponseObject, error)
+	// UpdateUser ユーザーのロールやパスワードを変える
+	// (PATCH /users/{id})
+	UpdateUser(ctx context.Context, request UpdateUserRequestObject) (UpdateUserResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx *echo.Context, request any) (any, error)
@@ -233,6 +893,144 @@ func NewStrictHandler(ssi StrictServerInterface, middlewares []StrictMiddlewareF
 type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
+}
+
+// Login operation middleware
+func (sh *strictHandler) Login(ctx *echo.Context) error {
+	var request LoginRequestObject
+
+	var body LoginJSONRequestBody
+	var err error
+	if _, ok := ctx.Echo().Binder.(*echo.DefaultBinder); ok {
+		// A request validator built on kin-openapi's openapi3filter with
+		// KeepValidatedValue leaves the value it validated on the body. Bind
+		// that value, matching member names exactly, so the handler receives
+		// what was validated instead of a second, case-insensitive decode.
+		// Otherwise bind only the request body, so that path and query
+		// parameters are not also bound into the body struct.
+		if vb, ok := ctx.Request().Body.(interface{ ValidatedValue() any }); !ok || runtime.BindJSONValue(vb.ValidatedValue(), &body) != nil {
+			err = echo.BindBody(ctx, &body)
+		}
+	} else {
+		// A custom binder is installed on the Echo instance; defer to it
+		// entirely, since echo.Binder does not expose body-only binding and
+		// the binder may do more than decode (for example call ctx.Validate).
+		err = ctx.Bind(&body)
+	}
+	if err != nil {
+		return err
+	}
+	request.Body = &body
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.Login(ctx.Request().Context(), request.(LoginRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Login")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(LoginResponseObject); ok {
+		return validResponse.VisitLoginResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// Logout operation middleware
+func (sh *strictHandler) Logout(ctx *echo.Context) error {
+	var request LogoutRequestObject
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.Logout(ctx.Request().Context(), request.(LogoutRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Logout")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(LogoutResponseObject); ok {
+		return validResponse.VisitLogoutResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// GetMe operation middleware
+func (sh *strictHandler) GetMe(ctx *echo.Context) error {
+	var request GetMeRequestObject
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.GetMe(ctx.Request().Context(), request.(GetMeRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetMe")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(GetMeResponseObject); ok {
+		return validResponse.VisitGetMeResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// ChangeOwnPassword operation middleware
+func (sh *strictHandler) ChangeOwnPassword(ctx *echo.Context) error {
+	var request ChangeOwnPasswordRequestObject
+
+	var body ChangeOwnPasswordJSONRequestBody
+	var err error
+	if _, ok := ctx.Echo().Binder.(*echo.DefaultBinder); ok {
+		// A request validator built on kin-openapi's openapi3filter with
+		// KeepValidatedValue leaves the value it validated on the body. Bind
+		// that value, matching member names exactly, so the handler receives
+		// what was validated instead of a second, case-insensitive decode.
+		// Otherwise bind only the request body, so that path and query
+		// parameters are not also bound into the body struct.
+		if vb, ok := ctx.Request().Body.(interface{ ValidatedValue() any }); !ok || runtime.BindJSONValue(vb.ValidatedValue(), &body) != nil {
+			err = echo.BindBody(ctx, &body)
+		}
+	} else {
+		// A custom binder is installed on the Echo instance; defer to it
+		// entirely, since echo.Binder does not expose body-only binding and
+		// the binder may do more than decode (for example call ctx.Validate).
+		err = ctx.Bind(&body)
+	}
+	if err != nil {
+		return err
+	}
+	request.Body = &body
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.ChangeOwnPassword(ctx.Request().Context(), request.(ChangeOwnPasswordRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ChangeOwnPassword")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(ChangeOwnPasswordResponseObject); ok {
+		return validResponse.VisitChangeOwnPasswordResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
 }
 
 // GetHealthz operation middleware
@@ -258,27 +1056,224 @@ func (sh *strictHandler) GetHealthz(ctx *echo.Context) error {
 	return nil
 }
 
+// ListUsers operation middleware
+func (sh *strictHandler) ListUsers(ctx *echo.Context) error {
+	var request ListUsersRequestObject
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.ListUsers(ctx.Request().Context(), request.(ListUsersRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListUsers")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(ListUsersResponseObject); ok {
+		return validResponse.VisitListUsersResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// CreateUser operation middleware
+func (sh *strictHandler) CreateUser(ctx *echo.Context) error {
+	var request CreateUserRequestObject
+
+	var body CreateUserJSONRequestBody
+	var err error
+	if _, ok := ctx.Echo().Binder.(*echo.DefaultBinder); ok {
+		// A request validator built on kin-openapi's openapi3filter with
+		// KeepValidatedValue leaves the value it validated on the body. Bind
+		// that value, matching member names exactly, so the handler receives
+		// what was validated instead of a second, case-insensitive decode.
+		// Otherwise bind only the request body, so that path and query
+		// parameters are not also bound into the body struct.
+		if vb, ok := ctx.Request().Body.(interface{ ValidatedValue() any }); !ok || runtime.BindJSONValue(vb.ValidatedValue(), &body) != nil {
+			err = echo.BindBody(ctx, &body)
+		}
+	} else {
+		// A custom binder is installed on the Echo instance; defer to it
+		// entirely, since echo.Binder does not expose body-only binding and
+		// the binder may do more than decode (for example call ctx.Validate).
+		err = ctx.Bind(&body)
+	}
+	if err != nil {
+		return err
+	}
+	request.Body = &body
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateUser(ctx.Request().Context(), request.(CreateUserRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateUser")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(CreateUserResponseObject); ok {
+		return validResponse.VisitCreateUserResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// DeleteUser operation middleware
+func (sh *strictHandler) DeleteUser(ctx *echo.Context, id UserID) error {
+	var request DeleteUserRequestObject
+
+	request.Id = id
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteUser(ctx.Request().Context(), request.(DeleteUserRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteUser")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(DeleteUserResponseObject); ok {
+		return validResponse.VisitDeleteUserResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// GetUser operation middleware
+func (sh *strictHandler) GetUser(ctx *echo.Context, id UserID) error {
+	var request GetUserRequestObject
+
+	request.Id = id
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUser(ctx.Request().Context(), request.(GetUserRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUser")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(GetUserResponseObject); ok {
+		return validResponse.VisitGetUserResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// UpdateUser operation middleware
+func (sh *strictHandler) UpdateUser(ctx *echo.Context, id UserID) error {
+	var request UpdateUserRequestObject
+
+	request.Id = id
+
+	var body UpdateUserJSONRequestBody
+	var err error
+	if _, ok := ctx.Echo().Binder.(*echo.DefaultBinder); ok {
+		// A request validator built on kin-openapi's openapi3filter with
+		// KeepValidatedValue leaves the value it validated on the body. Bind
+		// that value, matching member names exactly, so the handler receives
+		// what was validated instead of a second, case-insensitive decode.
+		// Otherwise bind only the request body, so that path and query
+		// parameters are not also bound into the body struct.
+		if vb, ok := ctx.Request().Body.(interface{ ValidatedValue() any }); !ok || runtime.BindJSONValue(vb.ValidatedValue(), &body) != nil {
+			err = echo.BindBody(ctx, &body)
+		}
+	} else {
+		// A custom binder is installed on the Echo instance; defer to it
+		// entirely, since echo.Binder does not expose body-only binding and
+		// the binder may do more than decode (for example call ctx.Validate).
+		err = ctx.Bind(&body)
+	}
+	if err != nil {
+		return err
+	}
+	request.Body = &body
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateUser(ctx.Request().Context(), request.(UpdateUserRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateUser")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(UpdateUserResponseObject); ok {
+		return validResponse.VisitUpdateUserResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
 // Base64 encoded, compressed with deflate, json marshaled OpenAPI spec.
 // Stored as a slice of fixed-width chunks rather than one concatenated
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"dSLeD+VH87Rrp/x4/l8DAA==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

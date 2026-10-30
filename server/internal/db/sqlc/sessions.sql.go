@@ -7,25 +7,38 @@ package sqlc
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 )
 
 const createSession = `-- name: CreateSession :one
 INSERT INTO sessions (user_id, token_hash, expires_at)
-VALUES ($1, $2, $3)
+SELECT users.id, $1::bytea, now() + make_interval(secs => $2::float8)
+FROM users
+WHERE users.id = $3
+  AND users.password_hash = $4
+FOR SHARE
 RETURNING id, user_id, token_hash, created_at, expires_at, last_seen_at
 `
 
 type CreateSessionParams struct {
-	UserID    uuid.UUID
-	TokenHash []byte
-	ExpiresAt time.Time
+	TokenHash    []byte
+	TtlSeconds   float64
+	UserID       uuid.UUID
+	PasswordHash string
 }
 
+// CreateSession はログイン時に検証したパスワードハッシュが変わっていない場合だけセッションを作る
+// （変わっていれば行を返さない）。ユーザーの行を FOR SHARE でロックするので、同時に実行された
+// パスワード変更（ハッシュの更新とセッションの全削除）とは直列になり、古いパスワードで作った
+// セッションが残らない。期限は DB の時計で now() + ttl にする。
 func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error) {
-	row := q.db.QueryRow(ctx, createSession, arg.UserID, arg.TokenHash, arg.ExpiresAt)
+	row := q.db.QueryRow(ctx, createSession,
+		arg.TokenHash,
+		arg.TtlSeconds,
+		arg.UserID,
+		arg.PasswordHash,
+	)
 	var i Session
 	err := row.Scan(
 		&i.ID,
@@ -45,6 +58,19 @@ WHERE expires_at <= now()
 
 func (q *Queries) DeleteExpiredSessions(ctx context.Context) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteExpiredSessions)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteSession = `-- name: DeleteSession :execrows
+DELETE FROM sessions
+WHERE id = $1
+`
+
+func (q *Queries) DeleteSession(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteSession, id)
 	if err != nil {
 		return 0, err
 	}
@@ -114,19 +140,24 @@ func (q *Queries) GetSessionByTokenHash(ctx context.Context, tokenHash []byte) (
 
 const touchSession = `-- name: TouchSession :execrows
 UPDATE sessions
-SET last_seen_at = now(), expires_at = $1
-WHERE id = $2
+SET last_seen_at = now(),
+    expires_at = LEAST(
+        now() + make_interval(secs => $1::float8),
+        created_at + make_interval(secs => $2::float8))
+WHERE id = $3
   AND expires_at > now()
 `
 
 type TouchSessionParams struct {
-	ExpiresAt time.Time
-	ID        uuid.UUID
+	IdleSeconds        float64
+	MaxLifetimeSeconds float64
+	ID                 uuid.UUID
 }
 
-// TouchSession は最終アクセス時刻を更新し、期限を延ばす（スライディング）。
+// TouchSession は最終アクセス時刻を更新し、期限を now() + idle に延ばす（スライディング）。
+// ただし作成時刻 + max_lifetime（絶対期限）は超えない。期限切れのセッションは延ばさない。
 func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) (int64, error) {
-	result, err := q.db.Exec(ctx, touchSession, arg.ExpiresAt, arg.ID)
+	result, err := q.db.Exec(ctx, touchSession, arg.IdleSeconds, arg.MaxLifetimeSeconds, arg.ID)
 	if err != nil {
 		return 0, err
 	}

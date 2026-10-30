@@ -11,9 +11,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/takiren/vms-demo/server/internal/auth"
 )
 
 // Environment variable names. Keep these in sync with .env.example.
@@ -23,12 +26,28 @@ const (
 	EnvShutdownTimeout = "VMS_SHUTDOWN_TIMEOUT"
 	EnvDatabaseURL     = "DATABASE_URL"
 	EnvSecretKey       = "VMS_SECRET_KEY" //nolint:gosec // G101: an environment variable name, not a credential
+
+	EnvHost               = "VMS_HOST"
+	EnvPublicOrigin       = "VMS_PUBLIC_ORIGIN"
+	EnvTrustedProxies     = "VMS_TRUSTED_PROXIES"
+	EnvSessionIdleTimeout = "VMS_SESSION_IDLE_TIMEOUT"
+	EnvSessionMaxLifetime = "VMS_SESSION_MAX_LIFETIME"
+	EnvAdminUsername      = "VMS_ADMIN_USERNAME"
+	EnvAdminPassword      = "VMS_ADMIN_PASSWORD" //nolint:gosec // G101: an environment variable name, not a credential
 )
 
 // Defaults for optional variables.
 const (
 	DefaultListenAddr      = ":8080"
 	DefaultShutdownTimeout = 10 * time.Second
+	DefaultSessionIdle     = auth.DefaultIdleTimeout
+	DefaultSessionMaxLife  = auth.DefaultMaxLifetime
+)
+
+// Bounds for the session durations.
+const (
+	minSessionIdle    = time.Minute
+	maxSessionMaxLife = 365 * 24 * time.Hour
 )
 
 // SecretKeySize is the length of VMS_SECRET_KEY after base64 decoding
@@ -50,6 +69,21 @@ type Config struct {
 	DatabaseURL DatabaseURL
 	// SecretKey is the AES-256 key used to encrypt stored credentials.
 	SecretKey SecretKey
+	// PublicOrigin is the origin browsers use, https://<VMS_HOST> unless
+	// VMS_PUBLIC_ORIGIN overrides it. State-changing requests must carry it
+	// in Origin (CSRF protection).
+	PublicOrigin string
+	// TrustedProxies are the peers whose X-Forwarded-For is believed when
+	// determining the client IP. Empty means trust no proxy.
+	TrustedProxies []netip.Prefix
+	// SessionIdleTimeout ends a session after this long without requests.
+	SessionIdleTimeout time.Duration
+	// SessionMaxLifetime ends a session this long after login.
+	SessionMaxLifetime time.Duration
+	// AdminUsername and AdminPassword create the first admin at startup if
+	// there is no admin yet. Both empty means do not create one.
+	AdminUsername string
+	AdminPassword Secret
 }
 
 // LogValue implements slog.LogValuer so that the whole config can be logged
@@ -61,8 +95,32 @@ func (c Config) LogValue() slog.Value {
 		slog.String("shutdown_timeout", c.ShutdownTimeout.String()),
 		slog.Any("database_url", c.DatabaseURL),
 		slog.Any("secret_key", c.SecretKey),
+		slog.String("public_origin", c.PublicOrigin),
+		slog.Any("trusted_proxies", c.TrustedProxies),
+		slog.String("session_idle_timeout", c.SessionIdleTimeout.String()),
+		slog.String("session_max_lifetime", c.SessionMaxLifetime.String()),
+		slog.String("admin_username", c.AdminUsername),
+		slog.Any("admin_password", c.AdminPassword),
 	)
 }
+
+// Secret is a string that never prints itself.
+type Secret struct{ s string }
+
+// Value returns the secret.
+func (s Secret) Value() string { return s.s }
+
+// IsSet reports whether the secret is non-empty.
+func (s Secret) IsSet() bool { return s.s != "" }
+
+// String hides the secret.
+func (s Secret) String() string { return redacted }
+
+// GoString hides the secret from %#v.
+func (s Secret) GoString() string { return redacted }
+
+// LogValue hides the secret from slog.
+func (s Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
 
 // DatabaseURL is a connection URL whose password is hidden when printed or
 // logged. Use Value to get the real URL.
@@ -190,10 +248,116 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		cfg.SecretKey = key
 	}
 
+	if origin, err := publicOrigin(get(EnvHost), get(EnvPublicOrigin)); err != nil {
+		errs = append(errs, err)
+	} else {
+		cfg.PublicOrigin = origin
+	}
+
+	if v := get(EnvTrustedProxies); v != "" {
+		prefixes, err := parsePrefixes(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", EnvTrustedProxies, err))
+		} else {
+			cfg.TrustedProxies = prefixes
+		}
+	}
+
+	cfg.SessionIdleTimeout, errs = durationVar(get, EnvSessionIdleTimeout, DefaultSessionIdle, minSessionIdle, maxSessionMaxLife, errs)
+	cfg.SessionMaxLifetime, errs = durationVar(get, EnvSessionMaxLifetime, DefaultSessionMaxLife, minSessionIdle, maxSessionMaxLife, errs)
+	if cfg.SessionIdleTimeout > cfg.SessionMaxLifetime {
+		errs = append(errs, fmt.Errorf("%s: must not exceed %s", EnvSessionIdleTimeout, EnvSessionMaxLifetime))
+	}
+
+	// The password is not trimmed: spaces are allowed in passwords.
+	adminPW, _ := lookup(EnvAdminPassword)
+	cfg.AdminUsername = get(EnvAdminUsername)
+	cfg.AdminPassword = Secret{s: adminPW}
+	switch {
+	case cfg.AdminUsername == "" && adminPW == "":
+	case cfg.AdminUsername == "" || adminPW == "":
+		errs = append(errs, fmt.Errorf("%s and %s must be set together", EnvAdminUsername, EnvAdminPassword))
+	default:
+		if err := auth.ValidateUsername(cfg.AdminUsername); err != nil {
+			errs = append(errs, fmt.Errorf("%s: must be 1-64 characters of A-Z a-z 0-9 . _ -", EnvAdminUsername))
+		}
+		if adminPW == placeholder {
+			errs = append(errs, fmt.Errorf("%s: is still the %s placeholder", EnvAdminPassword, placeholder))
+		} else if err := auth.ValidatePassword(adminPW); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", EnvAdminPassword, err))
+		}
+	}
+
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
 	}
 	return cfg, nil
+}
+
+func durationVar(get func(string) string, name string, def, lo, hi time.Duration, errs []error) (time.Duration, []error) {
+	v := get(name)
+	if v == "" {
+		return def, errs
+	}
+	d, err := time.ParseDuration(v)
+	switch {
+	case err != nil:
+		return def, append(errs, fmt.Errorf("%s: must be a duration (e.g. 12h): %w", name, err))
+	case d < lo || d > hi:
+		return def, append(errs, fmt.Errorf("%s: must be between %s and %s", name, lo, hi))
+	}
+	return d, errs
+}
+
+// publicOrigin returns the browser-facing origin: VMS_PUBLIC_ORIGIN if set,
+// otherwise https://<VMS_HOST>. It must be https, because the session
+// cookie is Secure.
+func publicOrigin(host, override string) (string, error) {
+	if override != "" {
+		u, err := url.Parse(override)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+			(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return "", fmt.Errorf("%s: must be an https origin such as https://vms.example.com", EnvPublicOrigin)
+		}
+		return "https://" + strings.ToLower(u.Host), nil
+	}
+	if host == "" {
+		return "", fmt.Errorf("%s: is required (the host name browsers use, e.g. vms.localhost)", EnvHost)
+	}
+	u, err := url.Parse("https://" + host)
+	if err != nil || u.Host != host || u.Hostname() == "" || u.User != nil {
+		return "", fmt.Errorf("%s: must be a host name (optionally with :port), without scheme or path", EnvHost)
+	}
+	return "https://" + strings.ToLower(host), nil
+}
+
+// parsePrefixes parses a comma-separated list of IP addresses and CIDRs.
+func parsePrefixes(v string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for part := range strings.SplitSeq(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			p, err := netip.ParsePrefix(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR %q", part)
+			}
+			if p.Addr().Is4In6() {
+				p = netip.PrefixFrom(p.Addr().Unmap(), max(0, p.Bits()-96))
+			}
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid IP address %q", part)
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return out, nil
 }
 
 // placeholder is the value .env.example ships with.

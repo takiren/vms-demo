@@ -23,6 +23,7 @@ func env(overrides map[string]string) func(string) (string, bool) {
 	m := map[string]string{
 		config.EnvDatabaseURL: testDBURL,
 		config.EnvSecretKey:   testKey,
+		config.EnvHost:        "vms.example",
 	}
 	for k, v := range overrides {
 		if v == "<unset>" {
@@ -56,6 +57,50 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if !bytes.Equal(cfg.SecretKey.Bytes(), bytes.Repeat([]byte{0x42}, 32)) {
 		t.Errorf("SecretKey.Bytes() mismatch")
+	}
+	if cfg.PublicOrigin != "https://vms.example" {
+		t.Errorf("PublicOrigin = %q", cfg.PublicOrigin)
+	}
+	if len(cfg.TrustedProxies) != 0 {
+		t.Errorf("TrustedProxies = %v, want none by default", cfg.TrustedProxies)
+	}
+	if cfg.SessionIdleTimeout != 12*time.Hour || cfg.SessionMaxLifetime != 7*24*time.Hour {
+		t.Errorf("session durations = %v, %v", cfg.SessionIdleTimeout, cfg.SessionMaxLifetime)
+	}
+	if cfg.AdminUsername != "" || cfg.AdminPassword.IsSet() {
+		t.Errorf("admin = %q, %v; want unset", cfg.AdminUsername, cfg.AdminPassword.IsSet())
+	}
+}
+
+func TestLoadAuthSettings(t *testing.T) {
+	cfg, err := config.Load(env(map[string]string{
+		config.EnvHost:               "VMS.Example:8443",
+		config.EnvTrustedProxies:     " 172.16.0.0/12, 10.0.0.5 ,::1, ::ffff:192.0.2.0/120",
+		config.EnvSessionIdleTimeout: "30m",
+		config.EnvSessionMaxLifetime: "24h",
+		config.EnvAdminUsername:      "root.admin",
+		config.EnvAdminPassword:      " a long admin password ",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PublicOrigin != "https://vms.example:8443" {
+		t.Errorf("PublicOrigin = %q", cfg.PublicOrigin)
+	}
+	want := []string{"172.16.0.0/12", "10.0.0.5/32", "::1/128", "192.0.2.0/24"}
+	if fmt.Sprint(cfg.TrustedProxies) != fmt.Sprint(want) {
+		t.Errorf("TrustedProxies = %v, want %v", cfg.TrustedProxies, want)
+	}
+	if cfg.SessionIdleTimeout != 30*time.Minute || cfg.SessionMaxLifetime != 24*time.Hour {
+		t.Errorf("durations = %v %v", cfg.SessionIdleTimeout, cfg.SessionMaxLifetime)
+	}
+	if cfg.AdminUsername != "root.admin" || cfg.AdminPassword.Value() != " a long admin password " {
+		t.Errorf("admin = %q (password must not be trimmed)", cfg.AdminUsername)
+	}
+
+	cfg, err = config.Load(env(map[string]string{config.EnvPublicOrigin: "https://VMS.example.com/"}))
+	if err != nil || cfg.PublicOrigin != "https://vms.example.com" {
+		t.Errorf("override: %q, %v", cfg.PublicOrigin, err)
 	}
 }
 
@@ -92,6 +137,22 @@ func TestLoadErrors(t *testing.T) {
 		{"bad log level", map[string]string{config.EnvLogLevel: "verbose"}, "VMS_LOG_LEVEL: must be one of"},
 		{"bad timeout", map[string]string{config.EnvShutdownTimeout: "ten"}, "VMS_SHUTDOWN_TIMEOUT: must be a duration"},
 		{"non-positive timeout", map[string]string{config.EnvShutdownTimeout: "0s"}, "VMS_SHUTDOWN_TIMEOUT: must be positive"},
+		{"missing host", map[string]string{config.EnvHost: "<unset>"}, "VMS_HOST: is required"},
+		{"host with scheme", map[string]string{config.EnvHost: "https://vms.example"}, "VMS_HOST: must be a host name"},
+		{"host with path", map[string]string{config.EnvHost: "vms.example/x"}, "VMS_HOST: must be a host name"},
+		{"http origin", map[string]string{config.EnvPublicOrigin: "http://vms.example"}, "VMS_PUBLIC_ORIGIN: must be an https origin"},
+		{"origin with path", map[string]string{config.EnvPublicOrigin: "https://vms.example/app"}, "VMS_PUBLIC_ORIGIN: must be an https origin"},
+		{"bad proxy", map[string]string{config.EnvTrustedProxies: "10.0.0.0/33"}, "VMS_TRUSTED_PROXIES: invalid CIDR"},
+		{"bad proxy ip", map[string]string{config.EnvTrustedProxies: "caddy"}, "VMS_TRUSTED_PROXIES: invalid IP address"},
+		{"bad idle", map[string]string{config.EnvSessionIdleTimeout: "1d"}, "VMS_SESSION_IDLE_TIMEOUT: must be a duration"},
+		{"idle too short", map[string]string{config.EnvSessionIdleTimeout: "10s"}, "VMS_SESSION_IDLE_TIMEOUT: must be between"},
+		{"max too long", map[string]string{config.EnvSessionMaxLifetime: "9000h"}, "VMS_SESSION_MAX_LIFETIME: must be between"},
+		{"idle exceeds max", map[string]string{config.EnvSessionIdleTimeout: "48h", config.EnvSessionMaxLifetime: "24h"}, "VMS_SESSION_IDLE_TIMEOUT: must not exceed"},
+		{"admin user without password", map[string]string{config.EnvAdminUsername: "admin"}, "must be set together"},
+		{"admin password without user", map[string]string{config.EnvAdminPassword: testPassword + "-long-enough"}, "must be set together"},
+		{"admin placeholder", map[string]string{config.EnvAdminUsername: "admin", config.EnvAdminPassword: "CHANGE_ME"}, "VMS_ADMIN_PASSWORD: is still the CHANGE_ME placeholder"},
+		{"admin weak password", map[string]string{config.EnvAdminUsername: "admin", config.EnvAdminPassword: testPassword}, "VMS_ADMIN_PASSWORD: password must be 12 to 128"},
+		{"admin bad username", map[string]string{config.EnvAdminUsername: "ad min", config.EnvAdminPassword: testPassword + "-long-enough"}, "VMS_ADMIN_USERNAME: must be"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,7 +187,10 @@ func TestLoadReportsAllErrors(t *testing.T) {
 }
 
 func TestSecretsAreRedacted(t *testing.T) {
-	cfg, err := config.Load(env(nil))
+	cfg, err := config.Load(env(map[string]string{
+		config.EnvAdminUsername: "admin",
+		config.EnvAdminPassword: testPassword + "-admin",
+	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -141,6 +205,7 @@ func TestSecretsAreRedacted(t *testing.T) {
 		"Sprint url":   fmt.Sprint(cfg.DatabaseURL),
 		"Sprint key":   fmt.Sprint(cfg.SecretKey),
 		"%#v url, key": fmt.Sprintf("%#v %#v", cfg.DatabaseURL, cfg.SecretKey),
+		"admin pw":     fmt.Sprintf("%v %+v %#v %s", cfg.AdminPassword, cfg.AdminPassword, cfg.AdminPassword, cfg.AdminPassword),
 	}
 	for name, out := range outputs {
 		if strings.Contains(out, testPassword) {
