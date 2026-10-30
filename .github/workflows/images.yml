@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - docker/**
+      - deploy/mediamtx.yml
       - .github/workflows/images.yml
   push:
     branches: [main]
     paths:
       - docker/**
+      - deploy/mediamtx.yml
       - .github/workflows/images.yml
 
 permissions:
