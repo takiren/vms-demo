@@ -20,14 +20,19 @@
 		reverse_proxy host.docker.internal:8080
 	}
 
-	# ライブ。プレフィックスを外して MediaMTX へ。Authorization とクエリはそのまま渡る
+	# ライブ。プレフィックスを外して MediaMTX へ。Authorization とクエリはそのまま渡る。
+	# MediaMTX はプレフィックスを知らずに絶対パスでリダイレクトする（cookieCheck など）ので、
+	# Location にプレフィックスを付け直す
 	handle_path /live/hls/* {
 		reverse_proxy mediamtx:8888 {
 			flush_interval -1
+			header_down Location "^/" "/live/hls/"
 		}
 	}
 	handle_path /live/webrtc/* {
-		reverse_proxy mediamtx:8889
+		reverse_proxy mediamtx:8889 {
+			header_down Location "^/" "/live/webrtc/"
+		}
 	}
 
 	# web（vite dev）

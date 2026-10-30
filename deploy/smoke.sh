@@ -114,13 +114,17 @@ for s in main sub; do
 done
 
 echo "== Caddy: /live/hls and /live/webrtc"
+# MediaMTX は初回に Cookie の確認でリダイレクトする（?cookieCheck=1）。Location が /live/hls/ の下を
+# 指すこと（Caddy が付け直す）を確かめてから、Cookie を持ってリダイレクトに従う
+loc=$(ccurl -o /dev/null -w '%{redirect_url}' "$base/live/hls/cam_smoke_sub/index.m3u8")
+case "$loc" in ""|"$base/live/hls/"*) ;; *) fail "HLS redirect escapes /live/hls/: $loc" ;; esac
 for i in $(seq 1 60); do
-  code=$(ccurl -o "$tmp/m3u8" -D "$tmp/m3u8.h" -w '%{http_code}' "$base/live/hls/cam_smoke_sub/index.m3u8")
+  code=$(ccurl -L -c "$tmp/jar" -b "$tmp/jar" -o "$tmp/m3u8" -D "$tmp/m3u8.h" -w '%{http_code}' "$base/live/hls/cam_smoke_sub/index.m3u8")
   [ "$code" = 200 ] && grep -q '#EXTM3U' "$tmp/m3u8" && break
   [ "$i" = 60 ] && { cat "$tmp/m3u8.h" "$tmp/m3u8"; fail "HLS via Caddy: $code"; }
   sleep 1
 done
-code=$(ccurl -o /dev/null -w '%{http_code}' "$base/live/webrtc/cam_smoke_sub/")
+code=$(ccurl -L -c "$tmp/jar" -b "$tmp/jar" -o /dev/null -w '%{http_code}' "$base/live/webrtc/cam_smoke_sub/")
 [ "$code" = 200 ] || fail "WebRTC page via Caddy: $code"
 code=$(ccurl -o /dev/null -w '%{http_code}' -X OPTIONS "$base/live/webrtc/cam_smoke_sub/whep")
 [ "${code:0:1}" = 2 ] || fail "WHEP OPTIONS via Caddy: $code"
