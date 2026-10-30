@@ -83,6 +83,7 @@ MediaMTX は `deploy/data/recordings` を `/recordings` として bind mount し
 4. CORS を設定する: Origin は `https://<VMS_HOST>` だけ、メソッドは GET / HEAD、ヘッダーは `Range` など。ワイルドカードは使わない
 
 - キーの形式: ID は `GK` + 16 進数 24 文字、シークレットは 16 進数 64 文字（Garage が自分で作るキーと同じ形式。`init.py` が検査し、`CHANGE_ME` のままなら分かるメッセージで失敗する）
+- Garage は、エラー応答（403 など）には CORS の設定にかかわらず `Access-Control-Allow-Origin: *` を付ける（v2.5 の挙動）。別オリジンの preflight は 403 になるのでブラウザは本体を送らず、成功した応答には自オリジン以外の許可は付かない。エラーの本文（コードとパス）が別オリジンから読めるだけで、オブジェクトは読めない
 - CORS の設定（S3 の PutBucketCors）にはバケットの owner 権限が要るので、設定の間だけキーに owner を与え、最後に外す。API に残るのは read / write だけ
 - Admin API と S3 の呼び出しは Python の標準ライブラリだけで行う（aws-cli などは入れない）
 - 保持期間による削除は API のジョブが行う。Garage の lifecycle は使わない

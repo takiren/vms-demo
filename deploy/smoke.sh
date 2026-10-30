@@ -67,18 +67,22 @@ code=$(ccurl -o /dev/null -w '%{http_code}' -T "$tmp/obj.txt" "$(python3 deploy/
 [ "$(ccurl "$(python3 deploy/smoke/presign.py GET "$obj")")" = hello ] || fail "presigned GET"
 code=$(ccurl -o /dev/null -w '%{http_code}' "$obj")
 [ "$code" = 403 ] || fail "anonymous GET should be 403, got $code"
-ccurl -o /dev/null -X DELETE "$(python3 deploy/smoke/presign.py DELETE "$obj")"
 
 echo "== CORS"
 cors() { ccurl -o /dev/null -D - -X OPTIONS -H "Origin: $1" -H 'Access-Control-Request-Method: GET' \
   -H 'Access-Control-Request-Headers: range' "$s3/$S3_BUCKET/x.mp4" | tr -d '\r'; }
 cors "https://$host" > "$tmp/cors.txt"
 grep -qi "^access-control-allow-origin: https://$host$" "$tmp/cors.txt" || { cat "$tmp/cors.txt"; fail "CORS: own origin not allowed"; }
+# 別オリジンの preflight は 403（ブラウザは preflight が 2xx でないと止める）。
+# Garage はエラー応答にいつも Access-Control-Allow-Origin: * を付けるので、ここではヘッダーを見ない
 cors "https://evil.example" > "$tmp/cors-evil.txt"
-if grep -qiE '^access-control-allow-origin: (\*|https://evil\.example)$' "$tmp/cors-evil.txt"; then
-  cat "$tmp/cors-evil.txt"; fail "CORS: foreign origin allowed"
-fi
 head -1 "$tmp/cors-evil.txt" | grep -q ' 403' || { cat "$tmp/cors-evil.txt"; fail "CORS: foreign preflight should be 403"; }
+# 実際の GET（presigned URL）: 自オリジンには許可を返し、別オリジンには返さない
+get_acao() { ccurl -o /dev/null -D - -H "Origin: $1" "$(python3 deploy/smoke/presign.py GET "$obj")" | tr -d '\r' \
+  | grep -i '^access-control-allow-origin:' || true; }
+[ "$(get_acao "https://$host")" = "access-control-allow-origin: https://$host" ] || fail "CORS: GET from own origin"
+[ -z "$(get_acao "https://evil.example")" ] || fail "CORS: GET from foreign origin got $(get_acao https://evil.example)"
+ccurl -o /dev/null -X DELETE "$(python3 deploy/smoke/presign.py DELETE "$obj")"
 
 echo "== Caddy: /api"
 [ "$(ccurl "$base/api/health")" = stub-api ] || fail "/api not routed to the host API"
