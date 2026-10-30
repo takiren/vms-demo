@@ -6,8 +6,10 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 [ -f .env ] || { echo ".env not found; run deploy/init-env.sh" >&2; exit 1; }
+set -a
 # shellcheck disable=SC1091
-set -a; . ./.env; set +a
+. ./.env
+set +a
 host="$VMS_HOST"
 https_port="${CADDY_HTTPS_PORT:-443}"
 tmp="$(mktemp -d)"
@@ -72,7 +74,11 @@ cors() { ccurl -o /dev/null -D - -X OPTIONS -H "Origin: $1" -H 'Access-Control-R
   -H 'Access-Control-Request-Headers: range' "$s3/$S3_BUCKET/x.mp4" | tr -d '\r'; }
 cors "https://$host" > "$tmp/cors.txt"
 grep -qi "^access-control-allow-origin: https://$host$" "$tmp/cors.txt" || { cat "$tmp/cors.txt"; fail "CORS: own origin not allowed"; }
-if cors "https://evil.example" | grep -qi '^access-control-allow-origin'; then fail "CORS: foreign origin allowed"; fi
+cors "https://evil.example" > "$tmp/cors-evil.txt"
+if grep -qiE '^access-control-allow-origin: (\*|https://evil\.example)$' "$tmp/cors-evil.txt"; then
+  cat "$tmp/cors-evil.txt"; fail "CORS: foreign origin allowed"
+fi
+head -1 "$tmp/cors-evil.txt" | grep -q ' 403' || { cat "$tmp/cors-evil.txt"; fail "CORS: foreign preflight should be 403"; }
 
 echo "== Caddy: /api"
 [ "$(ccurl "$base/api/health")" = stub-api ] || fail "/api not routed to the host API"
