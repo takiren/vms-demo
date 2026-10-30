@@ -25,14 +25,18 @@ RUN apt-get update \
 
 WORKDIR /build
 
-# ソースを取得し、SHA-256（固定値）と GPG 署名（固定したフィンガープリントの鍵）の両方で検証する
+# ソースを取得し、SHA-256（固定値）と GPG 署名の両方で検証する。
+# 署名の鍵はリポジトリに固定したもの（ffmpeg-release-key.asc）を使い、フィンガープリントも確かめる。
+# ffmpeg.org は CI から接続が切れることがあるので、リトライする。
+COPY ffmpeg-release-key.asc /build/ffmpeg-release-key.asc
 RUN set -eux; \
-    curl -fsSLO "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"; \
-    curl -fsSLO "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz.asc"; \
-    curl -fsSL -o ffmpeg-devel.asc https://ffmpeg.org/ffmpeg-devel.asc; \
+    for f in "ffmpeg-${FFMPEG_VERSION}.tar.xz" "ffmpeg-${FFMPEG_VERSION}.tar.xz.asc"; do \
+      curl -fsSL --retry 8 --retry-all-errors --retry-delay 5 --connect-timeout 20 \
+        -o "$f" "https://ffmpeg.org/releases/$f"; \
+    done; \
     echo "${FFMPEG_SHA256}  ffmpeg-${FFMPEG_VERSION}.tar.xz" | sha256sum -c -; \
     export GNUPGHOME="$(mktemp -d)"; \
-    gpg --batch --import ffmpeg-devel.asc; \
+    gpg --batch --import ffmpeg-release-key.asc; \
     gpg --batch --status-fd 1 --verify "ffmpeg-${FFMPEG_VERSION}.tar.xz.asc" "ffmpeg-${FFMPEG_VERSION}.tar.xz" \
       | grep -E "^\[GNUPG:\] VALIDSIG ${FFMPEG_GPG_FINGERPRINT} "; \
     rm -rf "${GNUPGHOME}"; \

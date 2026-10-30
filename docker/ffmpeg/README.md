@@ -8,6 +8,7 @@ API（と MediaMTX のイメージ）が使う ffmpeg / ffprobe を、LGPL-2.1-o
 | `Dockerfile` | Ubuntu 24.04 ベースの multi-stage ビルド |
 | `configure-flags.txt` | `configure` に渡す引数の全部（このファイルが正） |
 | `verify.sh` | ライセンス、構成、動作の検査（イメージの中で実行する） |
+| `ffmpeg-release-key.asc` | ソースの署名を検証する公開鍵 |
 | `testdata/` | 検査用の小さな fMP4（下記） |
 
 ## ソース
@@ -18,7 +19,7 @@ API（と MediaMTX のイメージ）が使う ffmpeg / ffprobe を、LGPL-2.1-o
 | URL | https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz |
 | 署名 | https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc |
 | SHA-256 | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` |
-| 署名の鍵 | FFmpeg release signing key（`FCF986EA15E6E293A5644F10B4322F04D67658D8`、https://ffmpeg.org/ffmpeg-devel.asc） |
+| 署名の鍵 | FFmpeg release signing key（`FCF986EA15E6E293A5644F10B4322F04D67658D8`）。https://ffmpeg.org/ffmpeg-devel.asc から取得したものを `ffmpeg-release-key.asc` として固定 |
 
 ビルドの中で SHA-256 と GPG 署名の両方を検証します。ソースへの変更（パッチ）はありません。
 ビルドしたイメージの `/opt/ffmpeg/src/` にも、同じ tarball と署名を入れています。
