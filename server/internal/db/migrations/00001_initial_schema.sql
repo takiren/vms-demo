@@ -36,10 +36,11 @@ CREATE INDEX sessions_user_id_idx ON sessions (user_id);
 CREATE TABLE cameras (
     id              uuid        PRIMARY KEY DEFAULT uuidv7(),
     name            text        NOT NULL UNIQUE CHECK (char_length(name) BETWEEN 1 AND 100),
-    -- 認証情報を含まない RTSP の URL。認証情報は credentials_enc に暗号化して持つ
-    main_url        text        NOT NULL CHECK (main_url <> ''),
+    -- 認証情報を含まない URL。認証情報は credentials_enc に暗号化して持つ。
+    -- CHECK は scheme:// の後の authority（最初の / ? # まで）に @ があるもの（userinfo）を拒否する
+    main_url        text        NOT NULL CHECK (main_url ~ '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#@]+([/?#].*)?$'),
     -- 多分割ライブ用（H.264）。ないカメラもある
-    sub_url         text        CHECK (sub_url <> ''),
+    sub_url         text        CHECK (sub_url ~ '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#@]+([/?#].*)?$'),
     -- AES-256-GCM で暗号化した RTSP の認証情報（鍵は VMS_SECRET_KEY）
     credentials_enc bytea,
     retention_days  integer     NOT NULL DEFAULT 7 CHECK (retention_days > 0),

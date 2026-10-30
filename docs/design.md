@@ -100,6 +100,8 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 - RTSP の認証情報は AES-256-GCM で暗号化する。鍵は環境変数 `VMS_SECRET_KEY` で渡す
 - `username` は ASCII（`[A-Za-z0-9._-]`、64 文字まで）に限り、大文字小文字を区別せずに一意にする（`lower(username)` の一意インデックス）
 - `sessions` にはセッショントークンの SHA-256 だけを保存する。生のトークンは保存しない
+- `cameras.main_url` / `sub_url` に認証情報（userinfo、`user:pass@`）を入れない。CHECK で拒否する
+- `pending_uploads` は `next_attempt_at` をリースにする。完了（削除）と失敗の記録は、取得時に返った `next_attempt_at` が一致するときだけ成功する（リースを失ったワーカーは書き換えられない）
 - 外部キーの `ON DELETE`
   - `sessions.user_id`: CASCADE（ユーザーを消したらセッションも消す）
   - `recordings.camera_id`: RESTRICT（録画が残っているカメラは消せない。先に S3 のオブジェクトと目録を消す。目録だけが消えて Garage にオブジェクトが残るのを防ぐ）

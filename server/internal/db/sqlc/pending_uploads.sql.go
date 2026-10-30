@@ -32,6 +32,7 @@ type ClaimPendingUploadsParams struct {
 
 // ClaimPendingUploads は処理できる行を古い順に取り、next_attempt_at を lease_until に進めて返す。
 // 処理中に落ちても、リースが切れれば別のワーカーが拾い直す。
+// 返った行の next_attempt_at がリースの証明になる。MarkPendingUploadFailed と DeletePendingUpload に渡す。
 func (q *Queries) ClaimPendingUploads(ctx context.Context, arg ClaimPendingUploadsParams) ([]PendingUpload, error) {
 	rows, err := q.db.Query(ctx, claimPendingUploads, arg.LeaseUntil, arg.MaxRows)
 	if err != nil {
@@ -62,10 +63,19 @@ func (q *Queries) ClaimPendingUploads(ctx context.Context, arg ClaimPendingUploa
 const deletePendingUpload = `-- name: DeletePendingUpload :execrows
 DELETE FROM pending_uploads
 WHERE id = $1
+  AND next_attempt_at = $2
 `
 
-func (q *Queries) DeletePendingUpload(ctx context.Context, id uuid.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, deletePendingUpload, id)
+type DeletePendingUploadParams struct {
+	ID         uuid.UUID
+	LeaseUntil time.Time
+}
+
+// DeletePendingUpload はアップロードと recordings への登録が済んだ行を消す。
+// lease_until は MarkPendingUploadFailed と同じく Claim が返した next_attempt_at。
+// 0 を返したらリースを失っている（別のワーカーが処理中）。
+func (q *Queries) DeletePendingUpload(ctx context.Context, arg DeletePendingUploadParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePendingUpload, arg.ID, arg.LeaseUntil)
 	if err != nil {
 		return 0, err
 	}
@@ -127,6 +137,7 @@ SET attempts = attempts + 1,
     last_error = $1,
     next_attempt_at = $2
 WHERE id = $3
+  AND next_attempt_at = $4
 RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at
 `
 
@@ -134,11 +145,20 @@ type MarkPendingUploadFailedParams struct {
 	LastError     *string
 	NextAttemptAt time.Time
 	ID            uuid.UUID
+	LeaseUntil    time.Time
 }
 
 // MarkPendingUploadFailed は失敗を記録し、次の試行時刻を設定する。
+// lease_until には ClaimPendingUploads が返した行の next_attempt_at をそのまま渡す。
+// リースが切れて別のワーカーが取り直していると一致せず、行を返さない（pgx.ErrNoRows）。
+// そのときはリースを失ったので、何もしないで手を引くこと。
 func (q *Queries) MarkPendingUploadFailed(ctx context.Context, arg MarkPendingUploadFailedParams) (PendingUpload, error) {
-	row := q.db.QueryRow(ctx, markPendingUploadFailed, arg.LastError, arg.NextAttemptAt, arg.ID)
+	row := q.db.QueryRow(ctx, markPendingUploadFailed,
+		arg.LastError,
+		arg.NextAttemptAt,
+		arg.ID,
+		arg.LeaseUntil,
+	)
 	var i PendingUpload
 	err := row.Scan(
 		&i.ID,

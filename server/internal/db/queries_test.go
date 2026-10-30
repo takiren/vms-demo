@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -343,23 +345,112 @@ func TestPendingUploads(t *testing.T) {
 		t.Fatalf("leased rows claimed again: %v, %v", none, err)
 	}
 
-	// A failure makes the row available again at next_attempt_at.
+	// A failure (by the lease holder) makes the row available again at next_attempt_at.
+	a := claimed[0]
 	failed, err := q.MarkPendingUploadFailed(ctx, sqlc.MarkPendingUploadFailedParams{
-		ID: claimed[0].ID, LastError: new("s3 unavailable"), NextAttemptAt: time.Now().Add(-time.Second),
+		ID: a.ID, LeaseUntil: a.NextAttemptAt, LastError: new("s3 unavailable"), NextAttemptAt: time.Now().Add(-time.Second),
 	})
 	if err != nil || failed.Attempts != 1 || *failed.LastError != "s3 unavailable" {
 		t.Fatalf("mark failed = %+v, %v", failed, err)
 	}
-	again, err := q.ClaimPendingUploads(ctx, sqlc.ClaimPendingUploadsParams{LeaseUntil: lease, MaxRows: 10})
-	if err != nil || len(again) != 1 || again[0].ID != claimed[0].ID || again[0].Attempts != 1 {
-		t.Fatalf("reclaim = %v, %v", again, err)
+	// The old lease is gone: a second report with it is rejected.
+	_, err = q.MarkPendingUploadFailed(ctx, sqlc.MarkPendingUploadFailedParams{
+		ID: a.ID, LeaseUntil: a.NextAttemptAt, LastError: new("dup"), NextAttemptAt: time.Now(),
+	})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("mark failed with spent lease: %v", err)
+	}
+
+	// Worker 1 holds b, its lease expires (simulated) and worker 2 re-claims b.
+	b := second[0]
+	stale := b.NextAttemptAt
+	if _, err := q.MarkPendingUploadFailed(ctx, sqlc.MarkPendingUploadFailedParams{
+		ID: b.ID, LeaseUntil: stale, LastError: new("timeout"), NextAttemptAt: time.Now().Add(-time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := q.ClaimPendingUploads(ctx, sqlc.ClaimPendingUploadsParams{LeaseUntil: time.Now().Add(10 * time.Minute), MaxRows: 10})
+	if err != nil || len(reclaimed) != 2 {
+		t.Fatalf("reclaim = %v, %v", reclaimed, err)
+	}
+	// UPDATE ... RETURNING does not guarantee order.
+	i := slices.IndexFunc(reclaimed, func(p sqlc.PendingUpload) bool { return p.ID == b.ID })
+	if i < 0 {
+		t.Fatalf("b not reclaimed: %v", reclaimed)
+	}
+	fresh := reclaimed[i]
+	if fresh.Attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", fresh.Attempts)
+	}
+	// The stale worker can neither delete nor mark the row it no longer owns.
+	if n, err := q.DeletePendingUpload(ctx, sqlc.DeletePendingUploadParams{ID: b.ID, LeaseUntil: stale}); err != nil || n != 0 {
+		t.Fatalf("stale delete = %d, %v", n, err)
+	}
+	_, err = q.MarkPendingUploadFailed(ctx, sqlc.MarkPendingUploadFailedParams{
+		ID: b.ID, LeaseUntil: stale, LastError: new("stale"), NextAttemptAt: time.Now(),
+	})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("stale mark failed: %v", err)
+	}
+	if got, err := q.ListOldestPendingUploads(ctx, 10); err != nil || len(got) != 2 || got[1].Attempts != 1 || !got[1].NextAttemptAt.Equal(fresh.NextAttemptAt) {
+		t.Fatalf("row changed by stale worker: %v, %v", got, err)
+	}
+	// The current holder can.
+	if n, err := q.DeletePendingUpload(ctx, sqlc.DeletePendingUploadParams{ID: b.ID, LeaseUntil: fresh.NextAttemptAt}); err != nil || n != 1 {
+		t.Fatalf("delete by holder = %d, %v", n, err)
 	}
 
 	oldest, err := q.ListOldestPendingUploads(ctx, 10)
-	if err != nil || len(oldest) != 2 || oldest[0].LocalPath != "/rec/a.mp4" {
+	if err != nil || len(oldest) != 1 || oldest[0].LocalPath != "/rec/a.mp4" {
 		t.Fatalf("oldest = %v, %v", oldest, err)
 	}
-	if n, err := q.DeletePendingUpload(ctx, claimed[0].ID); err != nil || n != 1 {
-		t.Fatalf("delete = %d, %v", n, err)
+}
+
+func TestCameraURLsRejectCredentials(t *testing.T) {
+	q, _ := newQueries(t)
+	ctx := t.Context()
+	cases := []struct {
+		url string
+		ok  bool
+	}{
+		{"rtsp://cam.local/stream", true},
+		{"rtsp://192.168.1.10:554/Streaming/Channels/101", true},
+		{"rtsp://host:554/path?x=@", true},
+		{"rtsp://host/a@b", true},
+		{"rtsp://host#frag@", true},
+		{"rtsps://host", true},
+		{"rtsp://user:pass@host/x", false},
+		{"rtsp://user@host", false},
+		{"rtsp://:pass@host:554", false},
+		{"rtsp://@host", false},
+		{"user:pass@host/x", false},
+		{"host/stream", false},
+		{"rtsp://", false},
+		{"rtsp:///path", false},
+		{"", false},
 	}
+	for i, tc := range cases {
+		for _, field := range []string{"main", "sub"} {
+			params := sqlc.CreateCameraParams{Name: fmt.Sprintf("cam-%d-%s", i, field), MainUrl: "rtsp://ok/main", RetentionDays: 7}
+			if field == "main" {
+				params.MainUrl = tc.url
+			} else {
+				params.SubUrl = &tc.url
+			}
+			_, err := q.CreateCamera(ctx, params)
+			if tc.ok && err != nil {
+				t.Errorf("%s_url %q rejected: %v", field, tc.url, err)
+			}
+			if !tc.ok {
+				var pgErr *pgconn.PgError
+				if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+					t.Errorf("%s_url %q: error = %v, want check violation", field, tc.url, err)
+				}
+			}
+		}
+	}
+	// UPDATE is checked too.
+	c := createCamera(t, q, "upd", true)
+	_, err := q.UpdateCamera(ctx, sqlc.UpdateCameraParams{ID: c.ID, Name: c.Name, MainUrl: "rtsp://u:p@host", RetentionDays: 7, Enabled: true})
+	wantPgError(t, err, "23514")
 }
