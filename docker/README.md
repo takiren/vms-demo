@@ -2,4 +2,5 @@
 
 Docker イメージのビルドファイルを管理するディレクトリです。
 
-- ffmpeg / mediamtx の Dockerfile
+- `ffmpeg/`: LGPL ビルドの ffmpeg（[README](ffmpeg/README.md)）
+- mediamtx の Dockerfile

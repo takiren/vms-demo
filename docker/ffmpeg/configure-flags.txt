@@ -1,0 +1,49 @@
+# ffmpeg の configure に渡す引数（1 行 1 つ。# 以降と空行は無視）。
+# 変更したら README.md の一覧と verify.sh の期待値も合わせて直す。
+
+--prefix=/opt/ffmpeg
+--enable-rpath
+
+# ライセンス: LGPL-2.1-or-later のまま（GPL / nonfree / LGPLv3 化しない）
+--disable-gpl
+--disable-nonfree
+--disable-version3
+
+# 共有ライブラリでビルドする（LGPL の差し替え要件のため）
+--enable-shared
+--disable-static
+--enable-pic
+
+# 外部ライブラリを自動検出で取り込まない
+--disable-autodetect
+--disable-network
+--disable-doc
+--disable-debug
+--disable-ffplay
+
+# いったん全部無効にして、必要なものだけ有効にする
+--disable-everything
+--enable-ffmpeg
+--enable-ffprobe
+--enable-avcodec
+--enable-avformat
+--enable-avfilter
+--enable-avdevice
+--enable-swscale
+--enable-swresample
+
+# サムネイル: 先頭のキーフレームを JPEG にする
+--enable-decoder=h264,hevc
+--enable-encoder=mjpeg
+--enable-parser=h264,hevc,aac,opus,mjpeg
+--enable-filter=scale,format,null,anull,select,testsrc
+
+# 録画の読み込みと切り出し（fMP4 セグメントを concat してストリームコピーで mp4 にする）
+--enable-demuxer=mov,concat
+--enable-muxer=mp4,mov,image2,image2pipe,mjpeg,null
+--enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata,null
+--enable-protocol=file,pipe
+
+# 検査用: -f lavfi -i testsrc で入力を作る（lavfi の出力は wrapped_avframe として渡される）
+--enable-indev=lavfi
+--enable-decoder=wrapped_avframe
