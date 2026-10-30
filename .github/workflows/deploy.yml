@@ -47,7 +47,7 @@ jobs:
         run: |
           rm .env
           deploy/init-env.sh
-          ! grep -q CHANGE_ME .env
+          if grep -q CHANGE_ME .env; then exit 1; fi
           docker compose config -q
 
   smoke:

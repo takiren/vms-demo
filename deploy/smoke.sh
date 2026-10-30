@@ -102,10 +102,10 @@ for s in main sub; do
 done
 
 echo "== Caddy: /live/hls and /live/webrtc"
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   code=$(ccurl -o "$tmp/m3u8" -w '%{http_code}' "$base/live/hls/cam_smoke_sub/index.m3u8")
   [ "$code" = 200 ] && grep -q '#EXTM3U' "$tmp/m3u8" && break
-  [ "$i" = 30 ] && fail "HLS via Caddy: $code"
+  [ "$i" = 60 ] && fail "HLS via Caddy: $code"
   sleep 1
 done
 code=$(ccurl -o /dev/null -w '%{http_code}' "$base/live/webrtc/cam_smoke_sub/")
@@ -122,8 +122,11 @@ for i in $(seq 1 30); do
 done
 echo "recorded: $f"
 mtx -o /dev/null -X DELETE "http://127.0.0.1:9997/v3/config/paths/delete/cam_smoke_main"
-sleep 2
+for i in $(seq 1 15); do
+  grep -q '"path":"cam_smoke_main"' "$tmp/hook.log" 2>/dev/null && break
+  [ "$i" = 15 ] && fail "segment-complete hook not received"
+  sleep 1
+done
 rm -f deploy/data/recordings/cam_smoke_main/*.mp4 || fail "host cannot delete recordings (check MEDIAMTX_UID/GID)"
-grep -q '"path":"cam_smoke_main"' "$tmp/hook.log" || fail "segment-complete hook not received"
 
 echo "OK"

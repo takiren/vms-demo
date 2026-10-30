@@ -85,11 +85,13 @@ services:
       garage:
         condition: service_healthy
 
-  # docker/mediamtx が FROM で使う ffmpeg のイメージ。ビルドするためだけのサービスで、起動しない
+  # docker/mediamtx が FROM で使う ffmpeg のイメージ。ビルドの順序をつけるためのサービス
+  # （mediamtx の additional_contexts で service:ffmpeg として参照する）。起動するとバージョンを出して終わる
   ffmpeg:
     image: vms-ffmpeg:local
     build: ../docker/ffmpeg
-    profiles: [build]
+    command: [-hide_banner, -version]
+    restart: "no"
 
   recordings-init:
     # bind mount の録画ディレクトリを作り、MediaMTX のユーザーのものにする
@@ -135,6 +137,8 @@ services:
       timeout: 3s
       retries: 20
     depends_on:
+      ffmpeg:
+        condition: service_completed_successfully
       recordings-init:
         condition: service_completed_successfully
 
