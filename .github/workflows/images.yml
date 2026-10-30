@@ -66,12 +66,8 @@ jobs:
           cache-from: type=gha,scope=ffmpeg
           cache-to: type=gha,scope=ffmpeg,mode=max
       - name: Build mediamtx image
-        uses: docker/build-push-action@v7.4.0
-        with:
-          context: docker/mediamtx
-          build-args: FFMPEG_IMAGE=vms-ffmpeg:ci
-          tags: vms-mediamtx:ci
-          load: true
-          push: false
+        # docker-container ビルダーはローカルのイメージ（vms-ffmpeg:ci）を参照できないので、
+        # docker ドライバーの既定のビルダーを使う
+        run: docker build --build-arg FFMPEG_IMAGE=vms-ffmpeg:ci -t vms-mediamtx:ci docker/mediamtx
       - name: Smoke test
         run: bash docker/mediamtx/smoke.sh vms-mediamtx:ci
