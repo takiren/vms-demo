@@ -26,7 +26,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   esac
   printf '%s\n' "$line"
 done < "$root/.env.example" > "$out"
-if grep -q CHANGE_ME "$out"; then
+if grep -v '^#' "$out" | grep -q CHANGE_ME; then
   echo "warning: CHANGE_ME left in $out" >&2
 fi
 echo "wrote $out"
