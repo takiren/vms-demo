@@ -1,0 +1,7 @@
+# 開発用のインフラ。リポジトリ直下で `docker compose up` する。
+# 中身は deploy/compose.yaml。このファイルは、リポジトリ直下の .env で変数を展開するためだけにある。
+name: vms
+
+include:
+  - path: deploy/compose.yaml
+    env_file: .env

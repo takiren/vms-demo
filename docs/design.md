@@ -224,6 +224,8 @@ docs/     設計ドキュメント
 - 開発時の起動
   - compose で起動するもの: Caddy、Postgres、Garage（と init コンテナ）、MediaMTX、テスト映像の配信
   - ホストで動かすもの: API（air）、web（vite dev）。Caddy から `host.docker.internal` で到達する
+  - リポジトリ直下で `docker compose up`。直下の `compose.yaml` が `deploy/compose.yaml` を include し、直下の `.env` で展開する
+  - テスト映像は GStreamer（OpenH264）で作る。開発用でも GPL のコンポーネントは使わない
 - 全部コンテナで動かす構成は `compose.prod.yaml` にする
 - バージョンはマイナーまで固定し、更新は Renovate に任せる
 - テスト: Go のユニットテストと testcontainers での結合テスト、web は Vitest

@@ -1,0 +1,88 @@
+name: Deploy
+
+on:
+  pull_request:
+    paths:
+      - compose.yaml
+      - deploy/**
+      - docker/**
+      - .env.example
+      - .github/workflows/deploy.yml
+  push:
+    branches: [main]
+    paths:
+      - compose.yaml
+      - deploy/**
+      - docker/**
+      - .env.example
+      - .github/workflows/deploy.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: docker compose config (.env.example as is)
+        run: |
+          cp .env.example .env
+          docker compose config -q
+      - name: Caddyfile
+        run: |
+          docker run --rm -e VMS_HOST=vms.localhost -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.11.7-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: shellcheck
+        run: shellcheck deploy/*.sh
+      - name: Python scripts compile
+        run: python3 -m py_compile deploy/garage-init/init.py deploy/smoke/*.py docker/testsrc/*.py
+      - name: garage-init rejects the placeholders
+        run: |
+          set -a; . ./.env; set +a
+          if out=$(python3 -I deploy/garage-init/init.py 2>&1); then echo "expected failure"; exit 1; fi
+          echo "$out"
+          echo "$out" | grep -q 'CHANGE_ME'
+      - name: init-env.sh fills every placeholder
+        run: |
+          rm .env
+          deploy/init-env.sh
+          ! grep -q CHANGE_ME .env
+          docker compose config -q
+
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.4.1
+      - name: Build ffmpeg image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: docker/ffmpeg
+          tags: vms-ffmpeg:local
+          load: true
+          push: false
+          cache-from: type=gha,scope=ffmpeg
+          cache-to: type=gha,scope=ffmpeg,mode=max
+      - name: Build testsrc image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: docker/testsrc
+          tags: vms-testsrc:local
+          load: true
+          push: false
+          cache-from: type=gha,scope=testsrc
+          cache-to: type=gha,scope=testsrc,mode=max
+      - name: Build mediamtx image
+        # docker-container ビルダーはローカルのイメージを参照できないので、既定のビルダーを使う
+        run: docker build --build-arg FFMPEG_IMAGE=vms-ffmpeg:local -t vms-mediamtx:local docker/mediamtx
+      - name: .env
+        run: |
+          deploy/init-env.sh
+          # ホストのユーザーで録画を書かせ、ホストから消せることを確かめる
+          sed -i "s/^MEDIAMTX_UID=.*/MEDIAMTX_UID=$(id -u)/; s/^MEDIAMTX_GID=.*/MEDIAMTX_GID=$(id -g)/" .env
+      - name: Smoke test
+        env:
+          SMOKE_UP_ARGS: --no-build
+        run: deploy/smoke.sh

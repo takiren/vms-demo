@@ -1,0 +1,44 @@
+# 開発用の Caddy。ホスト名は .env の VMS_HOST（既定 vms.localhost）。
+# TLS は Caddy の内部 CA（tls internal）。ブラウザに信頼させる方法は deploy/README.md。
+{
+	# 管理 API はコンテナ内の localhost だけ（healthcheck 用）
+	admin 127.0.0.1:2019
+}
+
+{$VMS_HOST} {
+	tls internal
+
+	# MediaMTX → API 専用のエンドポイント。外からは届かせない
+	# （MediaMTX は Caddy を通さず API を直接呼ぶ）。パスの大文字小文字は区別せずに照合される
+	@internal path /api/internal /api/internal/*
+	handle @internal {
+		respond 404
+	}
+
+	# API（ホストで動かす）。/api のプレフィックスは外さない
+	handle /api/* {
+		reverse_proxy host.docker.internal:8080
+	}
+
+	# ライブ。プレフィックスを外して MediaMTX へ。Authorization とクエリはそのまま渡る
+	handle_path /live/hls/* {
+		reverse_proxy mediamtx:8888 {
+			flush_interval -1
+		}
+	}
+	handle_path /live/webrtc/* {
+		reverse_proxy mediamtx:8889
+	}
+
+	# web（vite dev）
+	handle {
+		reverse_proxy host.docker.internal:5173
+	}
+}
+
+# Garage（S3）。presigned URL は Host とパスを署名に含むので、必ずサブドメインで振り分け、
+# パスも Host も書き換えない（reverse_proxy は既定で元の Host を渡す）。CORS は Garage が返す
+s3.{$VMS_HOST} {
+	tls internal
+	reverse_proxy garage:3900
+}
