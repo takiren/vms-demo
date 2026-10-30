@@ -86,3 +86,16 @@ jobs:
         env:
           SMOKE_UP_ARGS: --no-build
         run: deploy/smoke.sh
+
+  # docker compose up だけでビルドできること（ffmpeg → mediamtx の順序。service: の build context）
+  compose-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: docker compose build
+        run: |
+          deploy/init-env.sh
+          docker compose build
+          docker image inspect vms-ffmpeg:local vms-mediamtx:local vms-testsrc:local --format '{{.RepoTags}}'
+          docker run --rm --entrypoint ffmpeg vms-mediamtx:local -hide_banner -L | head -3 | grep -qi lesser
