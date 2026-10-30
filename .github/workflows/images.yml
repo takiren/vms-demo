@@ -35,3 +35,41 @@ jobs:
         run: |
           printf 'FROM vms-ffmpeg:ci AS ffmpeg\nFROM ubuntu:24.04\nCOPY --from=ffmpeg /opt/ffmpeg /opt/ffmpeg\nRUN /opt/ffmpeg/bin/ffmpeg -hide_banner -version\n' \
             | docker buildx build --builder default -
+
+  mediamtx:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.4.1
+      - name: Validate mediamtx.yml has no path definitions
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          lines = open("deploy/mediamtx.yml").read().splitlines()
+          paths = [l for l in lines if re.match(r"^paths:", l)]
+          if paths != ["paths: {}"]:
+              sys.exit("deploy/mediamtx.yml: 'paths' must be exactly 'paths: {}'")
+          idx = lines.index("paths: {}")
+          rest = [l for l in lines[idx + 1:] if l.strip() and not l.lstrip().startswith("#")]
+          if rest:
+              sys.exit("deploy/mediamtx.yml: unexpected entries after paths: %r" % rest)
+          PY
+      - name: Build ffmpeg image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: docker/ffmpeg
+          tags: vms-ffmpeg:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=ffmpeg
+          cache-to: type=gha,scope=ffmpeg,mode=max
+      - name: Build mediamtx image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: docker/mediamtx
+          build-args: FFMPEG_IMAGE=vms-ffmpeg:ci
+          tags: vms-mediamtx:ci
+          load: true
+          push: false
+      - name: Smoke test
+        run: bash docker/mediamtx/smoke.sh vms-mediamtx:ci

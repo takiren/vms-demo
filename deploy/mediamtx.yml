@@ -1,0 +1,55 @@
+# MediaMTX の全体設定（v1.21 系）。
+# path（カメラ）の定義は書かない。DB が正で、Go API が Control API で反映する。
+# 個別の値は環境変数 MTX_<キーを大文字にしたもの> で上書きできる（例: MTX_AUTHHTTPADDRESS）。
+# 詳細は docker/mediamtx/README.md。
+
+logLevel: info
+
+# 認証: すべての操作（read / publish / api / ...）を Go API に問い合わせる。
+# Control API の action: api も除外しない。API は Basic 認証で自分自身を名乗り、
+# 判定エンドポイントが許可する（README 参照）。
+authMethod: http
+authHTTPAddress: http://host.docker.internal:8080/api/internal/mediamtx/auth
+authHTTPExclude: []
+
+# Control API。コンテナの外には公開しない（compose では ports に書かない。
+# ホストの API から使うときは 127.0.0.1 にだけ公開する）。
+api: true
+apiAddress: :9997
+apiAllowOrigins: []
+
+# 使わないものは無効にする
+metrics: false
+pprof: false
+playback: false
+rtsp: false
+rtmp: false
+srt: false
+
+# ライブ配信（Caddy の /live/ の裏）。同一オリジンなので CORS は許可しない。
+hls: true
+hlsAddress: :8888
+hlsAllowOrigins: []
+hlsVariant: lowLatency
+webrtc: true
+webrtcAddress: :8889
+webrtcAllowOrigins: []
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+# ブラウザに伝える ICE candidate のホスト。公開するアドレスに合わせる
+# （MTX_WEBRTCADDITIONALHOSTS=203.0.113.10 など）。
+webrtcAdditionalHosts: []
+
+# path の既定値。録画は API が main の path だけ record: true にする。
+pathDefaults:
+  record: false
+  recordPath: /recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordSegmentDuration: 1m
+  # 削除は API のジョブで行う。MediaMTX には消させない
+  recordDeleteAfter: 0s
+  runOnRecordSegmentComplete: /usr/local/bin/mtx-segment-complete
+
+# 空にしておく。all_others も書かないので、API が追加していない path は拒否される。
+paths: {}
