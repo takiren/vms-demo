@@ -115,9 +115,9 @@ done
 
 echo "== Caddy: /live/hls and /live/webrtc"
 for i in $(seq 1 60); do
-  code=$(ccurl -o "$tmp/m3u8" -w '%{http_code}' "$base/live/hls/cam_smoke_sub/index.m3u8")
+  code=$(ccurl -o "$tmp/m3u8" -D "$tmp/m3u8.h" -w '%{http_code}' "$base/live/hls/cam_smoke_sub/index.m3u8")
   [ "$code" = 200 ] && grep -q '#EXTM3U' "$tmp/m3u8" && break
-  [ "$i" = 60 ] && fail "HLS via Caddy: $code"
+  [ "$i" = 60 ] && { cat "$tmp/m3u8.h" "$tmp/m3u8"; fail "HLS via Caddy: $code"; }
   sleep 1
 done
 code=$(ccurl -o /dev/null -w '%{http_code}' "$base/live/webrtc/cam_smoke_sub/")
