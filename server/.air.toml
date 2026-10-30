@@ -1,0 +1,31 @@
+#:schema https://json.schemastore.org/any.json
+# air（ホットリロード）の設定。server/ で `make dev` で起動する。
+
+root = "."
+tmp_dir = "tmp"
+# リポジトリ直下の .env を読む（無ければ無視される）
+env_files = ["../.env"]
+
+[build]
+cmd = "go build -o ./tmp/api ./cmd/api"
+entrypoint = ["./tmp/api"]
+include_ext = ["go"]
+exclude_dir = ["tmp", "bin", "testdata"]
+exclude_regex = ["_test\\.go$"]
+exclude_unchanged = true
+delay = 500 # ms
+stop_on_error = true
+# graceful shutdown を効かせる
+send_interrupt = true
+kill_delay = "5s"
+
+# api/openapi.yaml が変わったらコードを生成し直す。
+# 生成された .go が変わると、上の build で再ビルドされる。
+[[build.rules]]
+name = "openapi"
+cmd = "go generate ./..."
+include_dir = ["../api"]
+include_ext = ["yaml"]
+
+[misc]
+clean_on_exit = true

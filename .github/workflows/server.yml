@@ -1,0 +1,86 @@
+name: Server
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - "api/**"
+      - ".github/workflows/server.yml"
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "api/**"
+      - ".github/workflows/server.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: server
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Check generated code is up to date
+        run: |
+          go generate ./...
+          git diff --exit-code -- . ../api
+          untracked="$(git status --porcelain -- . ../api)"
+          if [ -n "$untracked" ]; then
+            echo "$untracked"
+            echo "::error::generated files are not committed; run 'make generate'"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: make test
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage.out ]; then
+            {
+              echo '### Go coverage (generated code excluded)'
+              echo '```'
+              go tool cover -func=coverage.out
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: server-coverage
+          path: server/coverage.out
+          if-no-files-found: ignore
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          # server/Makefile の GOLANGCI_LINT_VERSION と揃える（Go 1.27 でビルドされた版が必要）
+          version: v2.15.0
+          working-directory: server

@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oapi-codegen/oapi-codegen/HEAD/configuration-schema.json
+package: gen
+generate:
+  echo5-server: true
+  strict-server: true
+  models: true
+  embedded-spec: true
+compatibility:
+  # 型名を前置して、enum の定数名が衝突しないようにする（ErrorCodeBadRequest など）
+  always-prefix-enum-values: true
