@@ -1,6 +1,5 @@
 name: CI
 
-
 on:
   pull_request:
   push:
@@ -23,10 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Assert .env.example exists and no .env tracked
+      - name: Assert .env.example exists and no .env files tracked
         run: |
           test -f .env.example
-          if git ls-files | grep -E '(^|/)\.env$'; then
+          if git ls-files | grep -E '(^|/)\.env(\..+)?$' | grep -vE '(^|/)\.env\.example$'; then
             echo "Tracked .env file detected" >&2
             exit 1
           fi
