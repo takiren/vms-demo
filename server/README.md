@@ -8,22 +8,34 @@ Go による API サーバーの実装ディレクトリです。
   - `gen/`: `api/openapi.yaml` から oapi-codegen で生成したコード（手で編集しない）
   - `apierror/`: 共通エラー形式への変換
   - `validation/`: OpenAPI によるリクエスト検証のミドルウェア
+- `internal/db`: PostgreSQL の接続プールとマイグレーション
+  - `migrations/`: goose の SQL マイグレーション（バイナリに埋め込み、API の起動時に適用する）
+  - `queries/`: sqlc のクエリ
+  - `sqlc/`: `queries/` から sqlc で生成したコード（手で編集しない）
 - `internal/`: そのほかのビジネスロジック、カメラ管理、録画パイプライン、DB アクセスなど
 
 ## 開発
 
-Go 1.27 が必要です。ツール（oapi-codegen、air、golangci-lint）はバージョンを固定して `go tool` / `go run` で動かすので、別途インストールは要りません。
+Go 1.27 が必要です。ツール（oapi-codegen、sqlc、air、golangci-lint）はバージョンを固定して `go tool` / `go run` で動かすので、別途インストールは要りません。
 
 ```sh
 cd server
-make generate   # api/openapi.yaml からコードを生成する
+make generate   # api/openapi.yaml と internal/db の SQL からコードを生成する
 make build      # go build ./...
-make test       # go test -race（カバレッジは coverage.out）
+make test       # go test -race（testcontainers の結合テストを含む。Docker が必要。カバレッジは coverage.out）
+make test-short # Docker を使わないユニットテストだけ（go test -short）
 make lint       # golangci-lint
 make dev        # air でホットリロードしながら起動する（../.env を読む）
 ```
 
-`api/openapi.yaml` を変えたら `make generate` して、生成物もコミットしてください。CI で差分を確認しています。
+`api/openapi.yaml`、`internal/db/migrations/`、`internal/db/queries/` を変えたら `make generate` して、生成物もコミットしてください。CI で差分を確認しています。sqlc は cgo を使うので、初回の `make generate` はビルドに少し時間がかかります。
+
+## DB
+
+- API は起動時にマイグレーションを適用する（失敗したら起動しない）。goose のセッションロック（PostgreSQL の advisory lock）を取るので、複数のプロセスが同時に起動しても安全
+- マイグレーションを追加するときは `internal/db/migrations/` に `000NN_<name>.sql` を足す（`-- +goose Up` と `-- +goose Down` の両方を書く）。適用済みのファイルは書き換えない
+- PostgreSQL 18 以上が必要（ID の既定値に `uuidv7()` を使う）
+- 結合テストは `postgres:18.6-alpine` を testcontainers で起動する。テストごとに別のデータベースを作る
 
 ## 設定（環境変数）
 

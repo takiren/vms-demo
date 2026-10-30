@@ -23,6 +23,7 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0
@@ -30,6 +31,7 @@ jobs:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
 
+      # oapi-codegen と sqlc（internal/db）の生成物。sqlc は go run でバージョンを固定して動かす（cgo を使う）
       - name: Check generated code is up to date
         run: |
           go generate ./...
@@ -47,6 +49,7 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # testcontainers で PostgreSQL を起動する結合テストを含む（ubuntu-latest には Docker がある）
       - name: Test
         run: make test
 
