@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,8 @@ import (
 const testHash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA"
 
 // wantPgError fails the test unless err is a PostgreSQL error with the code.
-// 23505 unique_violation, 23503 foreign_key_violation, 23514 check_violation.
+// 23505 unique_violation, 23503 foreign_key_violation, 23001 restrict_violation,
+// 23514 check_violation.
 func wantPgError(t *testing.T, err error, code string) {
 	t.Helper()
 	var pgErr *pgconn.PgError
@@ -75,7 +77,7 @@ func TestUsers(t *testing.T) {
 	wantPgError(t, err, "23505")
 	_, err = q.CreateUser(ctx, sqlc.CreateUserParams{Username: "carol", PasswordHash: testHash, Role: "root"})
 	wantPgError(t, err, "23514")
-	for _, bad := range []string{"", "has space", "ünicode", string(make([]byte, 65))} {
+	for _, bad := range []string{"", "has space", "ünicode", strings.Repeat("a", 65)} {
 		_, err = q.CreateUser(ctx, sqlc.CreateUserParams{Username: bad, PasswordHash: testHash, Role: "viewer"})
 		wantPgError(t, err, "23514")
 	}
@@ -273,7 +275,7 @@ func TestCamerasRecordingsEvents(t *testing.T) {
 
 	// A camera with recordings cannot be deleted (ON DELETE RESTRICT).
 	_, err = q.DeleteCamera(ctx, cam.ID)
-	wantPgError(t, err, "23503")
+	wantPgError(t, err, "23001")
 
 	ev, err := q.InsertEvent(ctx, sqlc.InsertEventParams{Kind: "camera_disconnected", CameraID: &cam.ID, Payload: json.RawMessage(`{"reason":"timeout"}`)})
 	if err != nil {

@@ -29,6 +29,6 @@ WHERE id = $1
 RETURNING *;
 
 -- name: DeleteCamera :execrows
--- DeleteCamera は録画が残っていると外部キー（ON DELETE RESTRICT）で失敗する。
+-- DeleteCamera は録画が残っていると外部キー（ON DELETE RESTRICT、SQLSTATE 23001）で失敗する。
 DELETE FROM cameras
 WHERE id = $1;
