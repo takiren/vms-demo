@@ -199,7 +199,7 @@ func TestSessionExpiry(t *testing.T) {
 	svc, pool := newService(t)
 	ctx := t.Context()
 	mustCreate(t, svc, "alice", auth.RoleViewer)
-	exec := func(sql string, args ...any) {
+	exec := func(t *testing.T, sql string, args ...any) {
 		t.Helper()
 		if _, err := pool.Exec(ctx, sql, args...); err != nil {
 			t.Fatal(err)
@@ -241,7 +241,7 @@ func TestSessionExpiry(t *testing.T) {
 		tok := mustLogin(t, svc, "alice", pw)
 		p, _ := svc.Authenticate(ctx, tok)
 		// Last used 2 minutes ago and about to expire.
-		exec("UPDATE sessions SET last_seen_at = now() - interval '2 minutes', expires_at = now() + interval '10 seconds' WHERE id = $1", p.SessionID)
+		exec(t, "UPDATE sessions SET last_seen_at = now() - interval '2 minutes', expires_at = now() + interval '10 seconds' WHERE id = $1", p.SessionID)
 		if _, err := svc.Authenticate(ctx, tok); err != nil {
 			t.Fatal(err)
 		}
@@ -254,7 +254,7 @@ func TestSessionExpiry(t *testing.T) {
 	t.Run("idle session is rejected", func(t *testing.T) {
 		tok := mustLogin(t, svc, "alice", pw)
 		p, _ := svc.Authenticate(ctx, tok)
-		exec("UPDATE sessions SET last_seen_at = now() - interval '13 hours', expires_at = now() - interval '1 hour' WHERE id = $1", p.SessionID)
+		exec(t, "UPDATE sessions SET created_at = now() - interval '14 hours', last_seen_at = now() - interval '13 hours', expires_at = now() - interval '1 hour' WHERE id = $1", p.SessionID)
 		if _, err := svc.Authenticate(ctx, tok); !errors.Is(err, auth.ErrUnauthenticated) {
 			t.Errorf("idle session accepted: %v", err)
 		}
@@ -264,7 +264,7 @@ func TestSessionExpiry(t *testing.T) {
 		tok := mustLogin(t, svc, "alice", pw)
 		p, _ := svc.Authenticate(ctx, tok)
 		// Created almost 7 days ago, active until a while ago.
-		exec(`UPDATE sessions SET created_at = now() - interval '7 days' + interval '1 hour',
+		exec(t, `UPDATE sessions SET created_at = now() - interval '7 days' + interval '1 hour',
 			last_seen_at = now() - interval '5 minutes', expires_at = now() + interval '10 seconds' WHERE id = $1`, p.SessionID)
 		if _, err := svc.Authenticate(ctx, tok); err != nil {
 			t.Fatal(err)
@@ -276,7 +276,7 @@ func TestSessionExpiry(t *testing.T) {
 
 		// Past the absolute limit: a touch ends the session even though
 		// expires_at was still in the future.
-		exec(`UPDATE sessions SET created_at = now() - interval '7 days' - interval '1 second',
+		exec(t, `UPDATE sessions SET created_at = now() - interval '7 days' - interval '1 second',
 			last_seen_at = now() - interval '5 minutes', expires_at = now() + interval '10 seconds' WHERE id = $1`, p.SessionID)
 		_, _ = svc.Authenticate(ctx, tok)
 		if _, err := svc.Authenticate(ctx, tok); !errors.Is(err, auth.ErrUnauthenticated) {
