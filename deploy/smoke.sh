@@ -6,6 +6,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 [ -f .env ] || { echo ".env not found; run deploy/init-env.sh" >&2; exit 1; }
+# shellcheck disable=SC1091
 set -a; . ./.env; set +a
 host="$VMS_HOST"
 https_port="${CADDY_HTTPS_PORT:-443}"
@@ -19,7 +20,7 @@ cleanup() {
     dc ps -a || true
     dc logs --tail 40 || true
   fi
-  [ -n "$stub_pid" ] && kill "$stub_pid" 2>/dev/null || true
+  if [ -n "$stub_pid" ]; then kill "$stub_pid" 2>/dev/null || true; fi
   if [ -z "${SMOKE_KEEP:-}" ]; then
     dc down -v --remove-orphans >/dev/null 2>&1 || true
     dc run --rm --no-deps --entrypoint rm recordings-init -rf /recordings/cam_smoke_main >/dev/null 2>&1 || true
