@@ -96,6 +96,9 @@ for p in 3900 3901 3903 8888 8889; do
   if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$p/"; then fail "port $p is reachable from the host"; fi
 done
 
+echo "== MediaMTX: unused servers are disabled"
+if dc logs mediamtx 2>&1 | grep -E '\[(MoQ|RTSP|RTMP|SRT)\] (started|failed)|auto\.key'; then fail "unexpected MediaMTX server/warning"; fi
+
 echo "== MediaMTX pulls the test streams"
 for s in main sub; do
   extra=""; [ $s = main ] && extra=',"record":true'

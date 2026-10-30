@@ -72,7 +72,7 @@ MediaMTX は、設定のキーを `MTX_` + 大文字にした環境変数で上�
 
 - **path は書かない。** `paths: {}` にして `all_others` も置かない。API が Control API で追加していない path への接続は拒否される。API は起動時に必ず再同期する（MediaMTX の再起動で Control API 経由の path は消える）
 - **録画は path 単位。** `pathDefaults.record: false` で、API が `_main` の path だけ `record: true` にする。形式は fMP4、セグメントは 1 分、保存先は `/recordings/%path/%Y-%m-%d_%H-%M-%S-%f`。`recordDeleteAfter: 0s` で、削除は API のジョブだけが行う
-- **使わないものは無効。** RTSP サーバー、RTMP、SRT、metrics、pprof、playback。カメラへは MediaMTX が RTSP クライアントとして接続する（サーバーは要らない）
+- **使わないものは無効。** RTSP サーバー、RTMP、SRT、MoQ、metrics、pprof、playback。カメラへは MediaMTX が RTSP クライアントとして接続する（サーバーは要らない）
 - **CORS は許可しない。** Caddy で単一オリジンにするため。HLS / WebRTC の `allowOrigins` は空
 
 ### 認証（authMethod: http）
