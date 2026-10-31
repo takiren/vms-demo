@@ -81,20 +81,28 @@ func authenticate(policies *authz.Table, svc AuthService, hook hookAuth, live Li
 			if !ok {
 				return apierror.New(http.StatusForbidden, "access denied")
 			}
-			if policy.HookToken {
-				// Server-to-server: the shared secret only, never a session.
-				return hook.authenticate(c, next)
-			}
-
 			req := c.Request()
-			if policy.MediaMTX() {
-				// MediaMTX callbacks: check MediaMTX's credentials only. The
+			if policy.Internal() {
+				// Server-to-server: the scheme's own credentials only. The
 				// session cookie is never looked at.
-				if err := authenticateMediaMTX(c, live); err != nil {
-					return err
+				passed := func(c *echo.Context) error {
+					r := c.Request()
+					c.SetRequest(r.WithContext(context.WithValue(r.Context(), internalCallerKey{}, policy.Scheme)))
+					return next(c)
 				}
-				c.SetRequest(req.WithContext(context.WithValue(req.Context(), mediamtxCallerKey{}, true)))
-				return next(c)
+				switch policy.Scheme {
+				case authz.SchemeMediaMTX:
+					if err := authenticateMediaMTX(c, live); err != nil {
+						return err
+					}
+					return passed(c)
+				case authz.SchemeHookToken:
+					// The shared secret (X-VMS-Hook-Token) only.
+					return hook.authenticate(c, passed)
+				default:
+					// An internal scheme without a check here is never open.
+					return apierror.New(http.StatusForbidden, "access denied")
+				}
 			}
 
 			var user *auth.User
@@ -146,15 +154,8 @@ func strictAuthorize(policies *authz.Table) gen.StrictMiddlewareFunc {
 			if !ok {
 				return nil, apierror.New(http.StatusForbidden, "access denied")
 			}
-			if policy.HookToken {
-				if !hookAuthenticated(c.Request().Context()) {
-					return nil, apierror.New(http.StatusUnauthorized, "authentication required")
-				}
-				return f(c, request)
-			}
-
-			if policy.MediaMTX() {
-				if !isMediaMTXCaller(c.Request().Context()) {
+			if policy.Internal() {
+				if !isInternalCaller(c.Request().Context(), policy.Scheme) {
 					return nil, apierror.New(http.StatusUnauthorized, "authentication required")
 				}
 				return f(c, request)
@@ -171,12 +172,13 @@ func strictAuthorize(policies *authz.Table) gen.StrictMiddlewareFunc {
 	}
 }
 
-// mediamtxCallerKey marks a request whose MediaMTX credentials were checked.
-type mediamtxCallerKey struct{}
+// internalCallerKey carries the internal scheme whose credentials the
+// request passed.
+type internalCallerKey struct{}
 
-func isMediaMTXCaller(ctx context.Context) bool {
-	ok, _ := ctx.Value(mediamtxCallerKey{}).(bool)
-	return ok
+func isInternalCaller(ctx context.Context, scheme string) bool {
+	got, _ := ctx.Value(internalCallerKey{}).(string)
+	return got != "" && got == scheme
 }
 
 // authenticateMediaMTX checks the Basic credentials MediaMTX sends (the

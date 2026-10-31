@@ -35,7 +35,7 @@ var expected = map[string]string{
 
 	"mediamtxSegmentComplete": "hookToken",
 	"issueLiveToken":          "viewer",
-	"mediamtxAuth":            "mediamtx",
+	"mediamtxAuth":            "mediamtxAuth",
 }
 
 func TestEverySpecOperationHasADecidedPolicy(t *testing.T) {
@@ -57,11 +57,8 @@ func TestEverySpecOperationHasADecidedPolicy(t *testing.T) {
 		switch {
 		case p.Public:
 			got = "public"
-		case p.MediaMTX():
-			got = "mediamtx"
-		}
-		if p.HookToken {
-			got = "hookToken"
+		case p.Internal():
+			got = p.Scheme
 		}
 		want, ok := expectedByName[authz.StrictName(p.OperationID)]
 		if !ok {
@@ -111,8 +108,8 @@ func TestCheck(t *testing.T) {
 		{authz.Policy{MinRole: auth.RoleViewer}, odd, authz.ErrForbidden},
 		{authz.Policy{}, admin, authz.ErrForbidden}, // zero policy denies
 		// Sessions never satisfy the hook token scheme.
-		{authz.Policy{HookToken: true}, admin, authz.ErrUnauthenticated},
-		{authz.Policy{HookToken: true}, nil, authz.ErrUnauthenticated},
+		{authz.Policy{Scheme: authz.SchemeHookToken}, admin, authz.ErrUnauthenticated},
+		{authz.Policy{Scheme: authz.SchemeHookToken}, nil, authz.ErrUnauthenticated},
 		// No user satisfies the MediaMTX scheme (the middleware checks
 		// MediaMTX's own credentials instead).
 		{authz.Policy{Scheme: authz.SchemeMediaMTX}, admin, authz.ErrUnauthenticated},
@@ -208,9 +205,9 @@ func TestBuildInternalOperations(t *testing.T) {
 		{"mediamtx with role", "/internal/x", "      operationId: postX\n      security: [{mediamtxAuth: []}]\n      x-min-role: viewer", false},
 		{"mediamtx with scopes", "/internal/x", "      operationId: postX\n      security: [{mediamtxAuth: [a]}]", false},
 		{"mediamtx outside internal", "/x", "      operationId: postX\n      security: [{mediamtxAuth: []}]", false},
-		{"cookie under internal", "/internal/x", "      operationId: postX\n      x-min-role: admin", false},
-		{"public under internal", "/internal/x", "      operationId: postX\n      security: []", false},
 		{"mediamtx or cookie", "/internal/x", "      operationId: postX\n      security: [{mediamtxAuth: []}, {cookieAuth: []}]", false},
+		{"mediamtx and cookie", "/internal/x", "      operationId: postX\n      security: [{mediamtxAuth: [], cookieAuth: []}]", false},
+		{"unknown scheme under internal", "/internal/x", "      operationId: postX\n      security: [{other: []}]", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -225,5 +222,22 @@ func TestBuildInternalOperations(t *testing.T) {
 func TestStrictName(t *testing.T) {
 	if authz.StrictName("getHealthz") != "GetHealthz" || authz.StrictName("") != "" {
 		t.Error("StrictName is wrong")
+	}
+}
+
+// An internal scheme is internal because it is in InternalSchemes, not
+// because of its name: a second one works the same way.
+func TestInternalSchemesSet(t *testing.T) {
+	authz.InternalSchemes["other"] = true
+	t.Cleanup(func() { delete(authz.InternalSchemes, "other") })
+	if err := buildAt(t, "/internal/x", "      operationId: postX\n      security: [{other: []}]"); err != nil {
+		t.Errorf("second internal scheme under internal: %v", err)
+	}
+	if err := buildAt(t, "/x", "      operationId: postX\n      security: [{other: []}]"); err == nil {
+		t.Error("second internal scheme outside internal accepted")
+	}
+	p := authz.Policy{Scheme: "other"}
+	if !p.Internal() || p.MediaMTX() || !errors.Is(p.Check(&auth.User{Role: auth.RoleAdmin}), authz.ErrUnauthenticated) {
+		t.Errorf("policy %+v", p)
 	}
 }

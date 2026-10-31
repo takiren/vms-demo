@@ -208,7 +208,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
   - 許可は 200。拒否は 403。エンドポイント自体の認証に失敗したら 401、失敗が多すぎたら 429
 - エンドポイント自体も認証する（Caddy で外から遮断しているが、開発ではホストの :8080 に LAN から届きうる）
   - MediaMTX は Basic 認証（ユーザー `mediamtx`、パスワード `VMS_MEDIAMTX_AUTH_SECRET`）で名乗る。`authHTTPAddress` の URL の userinfo に入れる（`http://mediamtx:<secret>@api:8080/api/internal/mediamtx/auth`）。Go の HTTP クライアント（MediaMTX）は userinfo を `Authorization: Basic` で送り、エラーのメッセージでは伏せる。クエリ（`?secret=`）には入れない（MediaMTX のエラーログに URL がそのまま出るため）
-  - 比較は定数時間。OpenAPI の security scheme は `mediamtxAuth`（`/internal/` の操作だけに使える。`/internal/` の操作は Cookie では使えない）
+  - 比較は定数時間。OpenAPI の security scheme は `mediamtxAuth`（内部の方式。「認可」を参照）
 - 判定は既定で拒否。許可するのは次の 2 つだけ
 
 | action | 判定 |
@@ -245,7 +245,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
   - 全体の既定は `security: [cookieAuth: []]`。認証の要らない操作（`healthz`、ログイン、ログアウト）だけ `security: []` で外す
   - 認証が要る操作には、必要な最低ロールを `x-min-role`（`admin` か `viewer`）で必ず書く。`viewer` はログインしていれば誰でもよい
   - 認証の要らない操作に `x-min-role` を書いたもの、認証が要る操作で `x-min-role` がないもの、知らない方式のものがあれば、API は起動しない
-  - `/internal/` の操作は `mediamtxAuth`（`x-min-role` なし）だけ。`mediamtxAuth` を `/internal/` の外で使ったもの、`/internal/` の操作で別の方式のもの（`security: []` を含む）も、API は起動しない
+  - サーバー間の呼び出し用の方式（内部の方式。今は `mediamtxAuth` と `hookToken`。authz の `InternalSchemes` に並べる）は `/internal/` の操作だけが使え、スコープも `x-min-role` も付けない。セッションでは満たせない。`/internal/` の操作は内部の方式をちょうど 1 つ使う（`cookieAuth` や `security: []` は不可。`/internal/` は CSRF の確認をしないため）。外れたものがあれば API は起動しない
 - 判定はミドルウェアで行い、ハンドラでは行わない
   - Echo のルート（メソッドとパスのパターン）から操作を引き、リクエストの検証より前に判定する（未認証は 401、ロール不足は 403）
   - 念のため strict-server のミドルウェアでも、操作 ID で同じ判定をする。表にない操作は拒否する

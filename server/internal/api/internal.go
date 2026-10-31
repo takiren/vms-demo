@@ -40,14 +40,6 @@ func newHookAuth(token string) hookAuth {
 	return hookAuth{sum: sha256.Sum256([]byte(token)), set: true}
 }
 
-type hookCtxKey struct{}
-
-// hookAuthenticated reports whether the request passed the hook token check.
-func hookAuthenticated(ctx context.Context) bool {
-	ok, _ := ctx.Value(hookCtxKey{}).(bool)
-	return ok
-}
-
 func (h hookAuth) authenticate(c *echo.Context, next echo.HandlerFunc) error {
 	if !h.set {
 		// Never open: without a configured token the endpoint is off.
@@ -62,7 +54,6 @@ func (h hookAuth) authenticate(c *echo.Context, next echo.HandlerFunc) error {
 	if subtle.ConstantTimeCompare(got[:], h.sum[:]) != 1 {
 		return apierror.New(http.StatusUnauthorized, "authentication required")
 	}
-	c.SetRequest(req.WithContext(context.WithValue(req.Context(), hookCtxKey{}, true)))
 	return next(c)
 }
 
