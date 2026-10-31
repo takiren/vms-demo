@@ -110,6 +110,7 @@ func TestEveryOperationEnforcesItsPolicy(t *testing.T) {
 			target := "/api" + param.ReplaceAllString(path, adminUser.ID.String())
 			public := op.Security != nil && len(*op.Security) == 0
 			hook := op.Security != nil && len(*op.Security) == 1 && (*op.Security)[0]["hookToken"] != nil
+			mediamtx := op.Security != nil && len(*op.Security) == 1 && (*op.Security)[0]["mediamtxAuth"] != nil
 			role, _ := op.Extensions["x-min-role"].(string)
 
 			anon := send(e, method, target, "", sameOriginReq)
@@ -125,6 +126,13 @@ func TestEveryOperationEnforcesItsPolicy(t *testing.T) {
 				}
 				if rec := send(e, method, target, "", withHeader(api.HookTokenHeader, testHookToken)); rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 					t.Errorf("%s %s: hook token got %d", method, path, rec.Code)
+				}
+			case mediamtx:
+				// Session cookies never reach the MediaMTX callbacks.
+				for who, rec := range map[string]int{"anonymous": anon.Code, "viewer": viewer.Code, "admin": admin.Code} {
+					if rec != http.StatusUnauthorized {
+						t.Errorf("%s %s: %s got %d, want 401", method, path, who, rec)
+					}
 				}
 			case public:
 				if anon.Code == http.StatusUnauthorized || anon.Code == http.StatusForbidden {

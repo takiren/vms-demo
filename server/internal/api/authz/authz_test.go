@@ -34,6 +34,8 @@ var expected = map[string]string{
 	"deleteCamera":      "admin",
 
 	"mediamtxSegmentComplete": "hookToken",
+	"issueLiveToken":          "viewer",
+	"mediamtxAuth":            "mediamtx",
 }
 
 func TestEverySpecOperationHasADecidedPolicy(t *testing.T) {
@@ -52,8 +54,11 @@ func TestEverySpecOperationHasADecidedPolicy(t *testing.T) {
 	seen := map[string]bool{}
 	for route, p := range table.Policies() {
 		got := string(p.MinRole)
-		if p.Public {
+		switch {
+		case p.Public:
 			got = "public"
+		case p.MediaMTX():
+			got = "mediamtx"
 		}
 		if p.HookToken {
 			got = "hookToken"
@@ -108,6 +113,11 @@ func TestCheck(t *testing.T) {
 		// Sessions never satisfy the hook token scheme.
 		{authz.Policy{HookToken: true}, admin, authz.ErrUnauthenticated},
 		{authz.Policy{HookToken: true}, nil, authz.ErrUnauthenticated},
+		// No user satisfies the MediaMTX scheme (the middleware checks
+		// MediaMTX's own credentials instead).
+		{authz.Policy{Scheme: authz.SchemeMediaMTX}, admin, authz.ErrUnauthenticated},
+		{authz.Policy{Scheme: authz.SchemeMediaMTX}, nil, authz.ErrUnauthenticated},
+		{authz.Policy{Scheme: authz.SchemeMediaMTX, MinRole: auth.RoleViewer}, viewer, authz.ErrUnauthenticated},
 	}
 	for i, tt := range tests {
 		if err := tt.p.Check(tt.u); !errors.Is(err, tt.want) {
@@ -130,6 +140,7 @@ components:
     cookieAuth: {type: apiKey, in: cookie, name: s}
     other: {type: apiKey, in: header, name: X-Key}
     hookToken: {type: apiKey, in: header, name: X-VMS-Hook-Token}
+    mediamtxAuth: {type: http, scheme: basic}
 paths:
   /x:
     get:
@@ -192,7 +203,14 @@ func TestBuildInternalOperations(t *testing.T) {
 		{"hook token with scopes", "/internal/hook", "      operationId: hook\n      security: [{hookToken: [a]}]", false},
 		{"hook token or cookie", "/internal/hook", "      operationId: hook\n      security: [{hookToken: []}, {cookieAuth: []}]", false},
 		{"cookie under internal", "/internal/hook", "      operationId: hook\n      x-min-role: admin", false},
-		{"public under internal", "/internal/hook", "      operationId: hook\n      security: []", true},
+		{"public under internal", "/internal/hook", "      operationId: hook\n      security: []", false},
+		{"mediamtx under internal", "/internal/x", "      operationId: postX\n      security: [{mediamtxAuth: []}]", true},
+		{"mediamtx with role", "/internal/x", "      operationId: postX\n      security: [{mediamtxAuth: []}]\n      x-min-role: viewer", false},
+		{"mediamtx with scopes", "/internal/x", "      operationId: postX\n      security: [{mediamtxAuth: [a]}]", false},
+		{"mediamtx outside internal", "/x", "      operationId: postX\n      security: [{mediamtxAuth: []}]", false},
+		{"cookie under internal", "/internal/x", "      operationId: postX\n      x-min-role: admin", false},
+		{"public under internal", "/internal/x", "      operationId: postX\n      security: []", false},
+		{"mediamtx or cookie", "/internal/x", "      operationId: postX\n      security: [{mediamtxAuth: []}, {cookieAuth: []}]", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

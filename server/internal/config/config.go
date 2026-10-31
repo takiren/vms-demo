@@ -40,6 +40,7 @@ const (
 	EnvMediaMTXAPIUser      = "VMS_MEDIAMTX_API_USER"
 	EnvMediaMTXAPIPassword  = "VMS_MEDIAMTX_API_PASSWORD" //nolint:gosec // G101: an environment variable name, not a credential
 	EnvMediaMTXSyncInterval = "VMS_MEDIAMTX_SYNC_INTERVAL"
+	EnvMediaMTXAuthSecret   = "VMS_MEDIAMTX_AUTH_SECRET" //nolint:gosec // G101: an environment variable name, not a credential
 )
 
 // Defaults for optional variables.
@@ -118,6 +119,9 @@ type Config struct {
 	Ingest IngestConfig
 	// Retention is the retention and disk pressure jobs. See retention.go.
 	Retention RetentionConfig
+	// MediaMTXAuthSecret is the Basic password MediaMTX presents to the
+	// API's auth endpoint (in the userinfo of its authHTTPAddress).
+	MediaMTXAuthSecret Secret
 }
 
 // LogValue implements slog.LogValuer so that the whole config can be logged
@@ -142,6 +146,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Any("s3", c.S3),
 		slog.Any("ingest", c.Ingest),
 		slog.Any("retention", c.Retention),
+		slog.Any("mediamtx_auth_secret", c.MediaMTXAuthSecret),
 	)
 }
 
@@ -491,5 +496,22 @@ func loadMediaMTX(lookup func(string) (string, bool), get func(string) string, c
 
 	cfg.MediaMTXSyncInterval, errs = durationVar(get, EnvMediaMTXSyncInterval, DefaultMediaMTXSyncInterval,
 		minMediaMTXSyncInterval, maxMediaMTXSyncInterval, errs)
+
+	// It goes into a URL's userinfo, so only unreserved characters are
+	// allowed (no escaping needed anywhere).
+	secret, _ := lookup(EnvMediaMTXAuthSecret)
+	switch {
+	case secret == "":
+		errs = append(errs, fmt.Errorf("%s: is required (generate one with: openssl rand -hex 32)", EnvMediaMTXAuthSecret))
+	case secret == placeholder:
+		errs = append(errs, fmt.Errorf("%s: is still the %s placeholder (generate one with: openssl rand -hex 32)", EnvMediaMTXAuthSecret, placeholder))
+	case !mediamtxSecretPattern.MatchString(secret):
+		errs = append(errs, fmt.Errorf("%s: must be %d-256 characters of A-Z a-z 0-9 . _ ~ -", EnvMediaMTXAuthSecret, minMediaMTXPasswordLen))
+	default:
+		cfg.MediaMTXAuthSecret = Secret{s: secret}
+	}
 	return errs
 }
+
+// mediamtxSecretPattern is the URL-unreserved alphabet, at least 16 long.
+var mediamtxSecretPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]{16,256}$`)

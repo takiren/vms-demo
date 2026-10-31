@@ -19,6 +19,14 @@ JOIN users ON users.id = sessions.user_id
 WHERE sessions.token_hash = $1
   AND sessions.expires_at > now();
 
+-- name: GetSessionByID :one
+-- GetSessionByID は期限内のセッションを ID で、ユーザーと一緒に返す（ライブ用トークンの検証用。延長はしない）。
+SELECT sqlc.embed(sessions), sqlc.embed(users)
+FROM sessions
+JOIN users ON users.id = sessions.user_id
+WHERE sessions.id = $1
+  AND sessions.expires_at > now();
+
 -- name: TouchSession :execrows
 -- TouchSession は最終アクセス時刻を更新し、期限を now() + idle に延ばす（スライディング）。
 -- ただし作成時刻 + max_lifetime（絶対期限）は超えない。期限切れのセッションは延ばさない。
