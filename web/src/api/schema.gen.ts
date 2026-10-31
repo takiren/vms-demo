@@ -263,6 +263,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cameras/{id}/clip.mp4": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * 録画の切り出し（mp4 のダウンロード）
+         * @description `[from, to)` と重なる録画を Garage から一時ディレクトリに取得し、ffmpeg の concat demuxer で
+         *     コピーだけで（トランスコードせずに）結合した mp4 を返す。設計は docs/design.md の「録画の切り出し」。
+         *     ダウンロードは閲覧の一部なので viewer でよい。
+         *     - 範囲は `VMS_CLIP_MAX_RANGE`（既定 1 時間）まで。範囲の録画の合計が `VMS_CLIP_MAX_BYTES`（既定 4 GiB）を超えたら 400
+         *     - 先頭は `from` の直前のキーフレームから始まる（コピーなのでキーフレームの間では切れない。最大で GOP 1 つ分早い）。
+         *       終わりは長さで切る。録画のない区間は詰める（ファイルの時刻は壁時計と一致しない）
+         *     - 音声は、すべての録画に同じ形式の mp4 に入る音声（AAC、Opus など）があるときだけ含める。
+         *       G.711 など mp4 に入らないもの、録画ごとに形式が違うものは落として `X-VMS-Audio: dropped` を返す（失敗にはしない）
+         *     - 映像の形式（コーデック、プロファイル、解像度、画素形式）が範囲の途中で変わる（カメラの設定を変えた）場合は 422。
+         *       変わった時刻で範囲を分けて取り直す
+         *     - 同時に作る切り出しは全体で `VMS_CLIP_CONCURRENCY`（既定 2）、ユーザーごとに `VMS_CLIP_PER_USER`（既定 1）まで
+         *       （枠は応答を送り終えるまで持つ）。ユーザーの上限なら 429、全体の上限や一時ディレクトリの空き不足なら 503。どちらも `Retry-After`
+         *     - `from >= to`、範囲が長すぎる、録画が 5000 件を超える場合は 400。カメラがない、範囲に録画がない場合は 404。
+         *       オブジェクトストレージや ffmpeg がない場合は 503
+         */
+        get: operations["getCameraClip"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/mediamtx/segment-complete": {
         parameters: {
             query?: never;
@@ -450,7 +485,7 @@ export interface components {
          * @description 機械が判定するためのエラーの種類
          * @enum {string}
          */
-        ErrorCode: "bad_request" | "unauthorized" | "forbidden" | "not_found" | "method_not_allowed" | "conflict" | "payload_too_large" | "unsupported_media_type" | "too_many_requests" | "internal" | "service_unavailable";
+        ErrorCode: "bad_request" | "unauthorized" | "forbidden" | "not_found" | "method_not_allowed" | "conflict" | "payload_too_large" | "unsupported_media_type" | "too_many_requests" | "unprocessable" | "internal" | "service_unavailable";
     };
     responses: {
         /**
@@ -906,6 +941,63 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Timeline"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getCameraClip: {
+        parameters: {
+            query: {
+                /** @description 範囲の開始（RFC 3339。`+09:00` などの `+` は `%2B` にする） */
+                from: components["parameters"]["PlaybackFrom"];
+                /** @description 範囲の終わり（含まない。RFC 3339） */
+                to: components["parameters"]["PlaybackTo"];
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 切り出した mp4（`+faststart`。`Content-Length` つきでストリームする。`Cache-Control: no-store`） */
+            200: {
+                headers: {
+                    /**
+                     * @description `attachment; filename="<カメラ名>_<from>-<to>.mp4"; filename*=UTF-8''<同じ名前の UTF-8>`。
+                     *     時刻は UTC（`20260102T030000Z`）。`filename` は ASCII の英数字と `._-` だけ、`filename*` はカメラ名の文字を残す
+                     */
+                    "Content-Disposition": string;
+                    /** @description 音声の扱い（`included` 含めた、`dropped` 録画にあるが落とした、`none` 録画に音声がない） */
+                    "X-VMS-Audio": "included" | "dropped" | "none";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "video/mp4": string;
+                };
+            };
+            /** @description 同じユーザーの切り出しが上限（`VMS_CLIP_PER_USER`、既定 1）まで動いている。`Retry-After` 秒後に再試行する */
+            429: {
+                headers: {
+                    /** @description 再試行までの秒数 */
+                    "Retry-After": number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 切り出しを作れない（同時実行の上限、一時ディレクトリの空き不足）。`Retry-After` 秒後に再試行する */
+            503: {
+                headers: {
+                    /** @description 再試行までの秒数 */
+                    "Retry-After": number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             default: components["responses"]["Error"];

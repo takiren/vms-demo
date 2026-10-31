@@ -85,6 +85,8 @@ func CodeForStatus(status int) gen.ErrorCode {
 		return gen.ErrorCodeUnsupportedMediaType
 	case http.StatusTooManyRequests:
 		return gen.ErrorCodeTooManyRequests
+	case http.StatusUnprocessableEntity:
+		return gen.ErrorCodeUnprocessable
 	case http.StatusServiceUnavailable:
 		return gen.ErrorCodeServiceUnavailable
 	}
