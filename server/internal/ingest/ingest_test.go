@@ -417,6 +417,10 @@ func TestHappyPathKeepsFileForGracePeriod(t *testing.T) {
 		rec.SizeBytes != int64(len("segment")) || rec.ThumbnailKey == nil || *rec.ThumbnailKey != ThumbnailKey(key) {
 		t.Fatalf("recording = %+v", rec)
 	}
+	// "segment" is not an fMP4: uploaded anyway, without an init size.
+	if rec.InitSize != nil {
+		t.Errorf("init_size = %d, want NULL", *rec.InitSize)
+	}
 	row := h.q.only(t)
 	if row.UploadedAt == nil || !row.NextAttemptAt.Equal(h.clk.Now().Add(testGrace)) {
 		t.Fatalf("row not marked uploaded: %+v", row)
