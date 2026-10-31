@@ -77,6 +77,10 @@ func Middleware(doc *openapi3.T) (echo.MiddlewareFunc, error) {
 // toAPIError converts a validation failure into a client-facing error. The
 // message names what is wrong (parameter or body location and the schema
 // rule) but does not echo the rejected value back.
+//
+// kin-openapi's errors quote the rejected value (passwords, camera
+// credentials), so they are not kept as the cause either: the cause is
+// logged by the error handler.
 func toAPIError(err error) error {
 	// Errors that already carry a status, such as the body limit's 413 while
 	// the body is being read, win over the generic 400.
@@ -86,12 +90,12 @@ func toAPIError(err error) error {
 
 	var reqErr *openapi3filter.RequestError
 	if !errors.As(err, &reqErr) {
-		return apierror.Wrap(http.StatusBadRequest, "invalid request", err)
+		return apierror.New(http.StatusBadRequest, "invalid request")
 	}
 
 	if strings.HasPrefix(reqErr.Reason, "unsupported content type") ||
 		strings.HasPrefix(reqErr.Reason, "header Content-Type has unexpected value") {
-		return apierror.Wrap(http.StatusUnsupportedMediaType, "unsupported content type", err)
+		return apierror.New(http.StatusUnsupportedMediaType, "unsupported content type")
 	}
 
 	var where string
@@ -130,5 +134,5 @@ func toAPIError(err error) error {
 	if reason == "" {
 		reason = "is invalid"
 	}
-	return apierror.Wrap(http.StatusBadRequest, where+": "+reason, err)
+	return apierror.New(http.StatusBadRequest, where+": "+reason)
 }

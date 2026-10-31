@@ -53,12 +53,15 @@ type Options struct {
 	PublicOrigin string
 	// TrustedProxies are the peers whose X-Forwarded-For is believed.
 	TrustedProxies []netip.Prefix
+	// Cameras manages cameras. If nil, the camera operations respond 503.
+	Cameras CameraService
 }
 
 // Handlers implements gen.StrictServerInterface.
 type Handlers struct {
-	auth   AuthService
-	logger *slog.Logger
+	auth    AuthService
+	logger  *slog.Logger
+	cameras CameraService
 }
 
 var _ gen.StrictServerInterface = (*Handlers)(nil)
@@ -103,7 +106,7 @@ func New(logger *slog.Logger, opts Options) (*echo.Echo, error) {
 		validator,
 	)
 
-	h := &Handlers{auth: opts.Auth, logger: logger}
+	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras}
 	strict := gen.NewStrictHandler(h, []gen.StrictMiddlewareFunc{strictAuthorize(policies)})
 	gen.RegisterHandlersWithBaseURL(e, strict, BasePath)
 

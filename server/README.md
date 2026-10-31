@@ -11,6 +11,9 @@ Go による API サーバーの実装ディレクトリです。
   - `authz/`: OpenAPI の `security` と `x-min-role` から作る、操作ごとの認可の表
   - `clientip/`: 信頼するプロキシの `X-Forwarded-For` から接続元 IP を求める
 - `internal/auth`: ユーザー、パスワード（argon2id）、セッション、ログインの回数制限
+- `internal/camera`: カメラの登録と検証、RTSP 認証情報の暗号化、MediaMTX に渡す source の組み立て
+- `internal/mediamtx`: MediaMTX の Control API のクライアントと、DB のカメラを path に反映する reconciler
+- `internal/sealbox`: AES-256-GCM による秘密情報の暗号化（DB に保存する認証情報など）
 - `internal/testutil/pgtest`: 結合テスト用に PostgreSQL のコンテナとテストごとの DB を用意する
 - `internal/db`: PostgreSQL の接続プールとマイグレーション
   - `migrations/`: goose の SQL マイグレーション（バイナリに埋め込み、API の起動時に適用する）
@@ -57,6 +60,10 @@ make dev        # air でホットリロードしながら起動する（../.env
 | `VMS_SESSION_MAX_LIFETIME` | | `168h` | ログインからセッションが必ず切れるまで（アイドル以上、8760h 以下） |
 | `VMS_ADMIN_USERNAME` | | | 初期 admin のユーザー名。`VMS_ADMIN_PASSWORD` と組で設定する |
 | `VMS_ADMIN_PASSWORD` | | | 初期 admin のパスワード（12〜128 文字）。admin が 1 人もいないときだけ使う |
+| `VMS_MEDIAMTX_API_URL` | | `http://127.0.0.1:9997` | MediaMTX の Control API（http / https、パスなし） |
+| `VMS_MEDIAMTX_API_USER` | | `vms-api` | Control API に名乗るユーザー名（`[A-Za-z0-9._-]`、64 文字まで） |
+| `VMS_MEDIAMTX_API_PASSWORD` | ○ | | Control API に名乗るパスワード（16〜256 バイト。`openssl rand -hex 32`） |
+| `VMS_MEDIAMTX_SYNC_INTERVAL` | | `30s` | カメラを MediaMTX に再同期する間隔（5s〜1h） |
 
 不正な値や `CHANGE_ME` のままの値があると、すべての問題を表示して起動しません。
 
@@ -81,3 +88,27 @@ api reset-password <username>    # パスワードを変え、そのユーザー
 # 例（compose の中で）
 docker compose exec -it api api reset-password admin
 ```
+
+## カメラと MediaMTX
+
+設計は `docs/design.md` の「MediaMTX」と「カメラ管理」。
+
+- カメラの一覧（`GET /api/cameras`）は viewer も使える。返すのは `id`、`name`、`enabled`、`has_sub` だけ。URL などの設定の取得、登録、変更、削除は admin だけ
+- URL は `rtsp://` か `rtsps://`。URL に認証情報（`user:password@`）を入れると 400。認証情報は `credentials`（`username`、`password`）で渡す
+  - 認証情報は書き込み専用。API は返さず（`has_credentials` だけ）、ログにも出さない。変更は `credentials` で置き換え、`remove_credentials: true` で消す
+- 録画が残っているカメラは削除できない（409）。止めるだけなら `enabled: false` にする（MediaMTX から path を外す）
+- 開発環境のテスト映像は `rtsp://testsrc:8554/main` と `rtsp://testsrc:8554/sub`（MediaMTX のコンテナから見た URL）
+
+```sh
+curl -sk -b cookies -H "Origin: https://vms.localhost" -H "Content-Type: application/json" \
+  -d '{"name":"testsrc","main_url":"rtsp://testsrc:8554/main","sub_url":"rtsp://testsrc:8554/sub"}' \
+  https://vms.localhost/api/cameras
+```
+
+### MediaMTX への反映
+
+- API は、有効なカメラごとに `cam_<uuid>_main`（`record: true`、常時接続）と `cam_<uuid>_sub`（`record: false`、`sourceOnDemand: true`。sub の URL があるときだけ）を Control API で反映する。source は URL に認証情報を入れたもの
+- 差分同期: `GET /v3/config/paths/list` と比べ、違うものだけ add / replace / delete する。`cam_` で始まらない path には触らない
+- 同期するのは、起動時、カメラの変更時、`VMS_MEDIAMTX_SYNC_INTERVAL` ごと（MediaMTX を再起動すると Control API で足した path は消えるため）。失敗したら 1 秒から間隔までの指数バックオフでやり直す。MediaMTX が落ちていても API は起動する
+- 認証情報を復号できないカメラ（`VMS_SECRET_KEY` を変えた、など）は、MediaMTX の path をそのままにしてエラーをログに出す
+- Control API には `VMS_MEDIAMTX_API_USER` / `VMS_MEDIAMTX_API_PASSWORD` の Basic 認証で名乗る。MediaMTX は `authMethod: http` でこれを API の認証エンドポイント（#10）に問い合わせる。そのエンドポイントができるまでは、同期は 401 で失敗し続ける

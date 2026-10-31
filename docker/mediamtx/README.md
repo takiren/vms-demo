@@ -97,7 +97,13 @@ API の判定エンドポイント（#10）は `POST /api/internal/mediamtx/auth
 `action` は `publish` / `read` / `playback` / `api` / `metrics` / `pprof`。
 
 - `authHTTPExclude` は空。Control API（`action: api`）も除外しない
-  - Go API は Control API を呼ぶとき、Basic 認証で自分自身を名乗る（ユーザー名とパスワードは API 側の設定）。判定エンドポイントは `action: api` を、この資格情報にだけ許可する（定数時間で比較する）。それ以外の `api`、`metrics`、`pprof`、`publish`、`playback` は拒否する
+  - Go API は Control API を呼ぶとき、Basic 認証で自分自身を名乗る（`VMS_MEDIAMTX_API_USER`、既定 `vms-api` / `VMS_MEDIAMTX_API_PASSWORD`）。MediaMTX は問い合わせの `user` / `password` にこれを入れる。判定エンドポイントは `action: api` を、この組にだけ許可する（両方を定数時間で比較する）。それ以外の `api`、`metrics`、`pprof`、`publish`、`playback` は拒否する
+  - API が使う Control API は `/v3/config/paths/list`、`add`、`replace`、`delete` だけ
+  - v1.21.3 で確かめた `action: api` の問い合わせ（Basic 認証のとき）。`path` と `protocol` は空、`id` は `null`。**Basic のパスワードは `token` にも入る**ので、`token` だけを見て判定しないこと
+
+    ```json
+    {"ip":"172.18.0.1","user":"vms-api","password":"<VMS_MEDIAMTX_API_PASSWORD>","token":"<VMS_MEDIAMTX_API_PASSWORD>","action":"api","path":"","protocol":"","id":null,"query":"","userAgent":""}
+    ```
   - Control API のポート（9997）は外に公開しないので、二重の防御になる
 - `action: read` は、ブラウザのセッション Cookie では判定できない（MediaMTX の問い合わせにはブラウザの Cookie が含まれない）。API がライブ用の短命なトークンを発行し、`query`（`?token=...`）または `token` で受け取る方式を #10 で決める
 - 判定エンドポイントが落ちている、または到達できないときは、MediaMTX は拒否する（ライブは見えなくなるが、録画は続く）

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,6 +35,11 @@ const (
 	EnvSessionMaxLifetime = "VMS_SESSION_MAX_LIFETIME"
 	EnvAdminUsername      = "VMS_ADMIN_USERNAME"
 	EnvAdminPassword      = "VMS_ADMIN_PASSWORD" //nolint:gosec // G101: an environment variable name, not a credential
+
+	EnvMediaMTXAPIURL       = "VMS_MEDIAMTX_API_URL"
+	EnvMediaMTXAPIUser      = "VMS_MEDIAMTX_API_USER"
+	EnvMediaMTXAPIPassword  = "VMS_MEDIAMTX_API_PASSWORD" //nolint:gosec // G101: an environment variable name, not a credential
+	EnvMediaMTXSyncInterval = "VMS_MEDIAMTX_SYNC_INTERVAL"
 )
 
 // Defaults for optional variables.
@@ -42,6 +48,17 @@ const (
 	DefaultShutdownTimeout = 10 * time.Second
 	DefaultSessionIdle     = auth.DefaultIdleTimeout
 	DefaultSessionMaxLife  = auth.DefaultMaxLifetime
+
+	DefaultMediaMTXAPIURL       = "http://127.0.0.1:9997"
+	DefaultMediaMTXAPIUser      = "vms-api"
+	DefaultMediaMTXSyncInterval = 30 * time.Second
+)
+
+// Bounds for the MediaMTX settings.
+const (
+	minMediaMTXSyncInterval = 5 * time.Second
+	maxMediaMTXSyncInterval = time.Hour
+	minMediaMTXPasswordLen  = 16
 )
 
 // Bounds for the session durations.
@@ -84,6 +101,16 @@ type Config struct {
 	// there is no admin yet. Both empty means do not create one.
 	AdminUsername string
 	AdminPassword Secret
+	// MediaMTXAPIURL is the base URL of the MediaMTX Control API.
+	MediaMTXAPIURL string
+	// MediaMTXAPIUser and MediaMTXAPIPassword are the Basic credentials the
+	// API presents to the Control API. MediaMTX forwards them to the API's
+	// auth endpoint, which allows action "api" only for exactly these.
+	MediaMTXAPIUser     string
+	MediaMTXAPIPassword Secret
+	// MediaMTXSyncInterval is how often the cameras are re-applied to
+	// MediaMTX (it forgets them when it restarts).
+	MediaMTXSyncInterval time.Duration
 }
 
 // LogValue implements slog.LogValuer so that the whole config can be logged
@@ -101,6 +128,10 @@ func (c Config) LogValue() slog.Value {
 		slog.String("session_max_lifetime", c.SessionMaxLifetime.String()),
 		slog.String("admin_username", c.AdminUsername),
 		slog.Any("admin_password", c.AdminPassword),
+		slog.String("mediamtx_api_url", c.MediaMTXAPIURL),
+		slog.String("mediamtx_api_user", c.MediaMTXAPIUser),
+		slog.Any("mediamtx_api_password", c.MediaMTXAPIPassword),
+		slog.String("mediamtx_sync_interval", c.MediaMTXSyncInterval.String()),
 	)
 }
 
@@ -288,6 +319,8 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		}
 	}
 
+	errs = loadMediaMTX(lookup, get, &cfg, errs)
+
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
 	}
@@ -401,4 +434,50 @@ func parseSecretKey(v string) (SecretKey, error) {
 		return SecretKey{}, fmt.Errorf("must decode to %d bytes, got %d", SecretKeySize, len(b))
 	}
 	return SecretKey{b: b}, nil
+}
+
+// mediamtxUserPattern restricts the Control API username to characters that
+// need no escaping anywhere (Basic auth, logs, the auth endpoint's JSON).
+var mediamtxUserPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// loadMediaMTX reads the MediaMTX Control API settings.
+func loadMediaMTX(lookup func(string) (string, bool), get func(string) string, cfg *Config, errs []error) []error {
+	cfg.MediaMTXAPIURL = DefaultMediaMTXAPIURL
+	if v := get(EnvMediaMTXAPIURL); v != "" {
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+			(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			errs = append(errs, fmt.Errorf("%s: must be an http(s) URL without path, e.g. %s", EnvMediaMTXAPIURL, DefaultMediaMTXAPIURL))
+		} else {
+			cfg.MediaMTXAPIURL = u.Scheme + "://" + u.Host
+		}
+	}
+
+	cfg.MediaMTXAPIUser = DefaultMediaMTXAPIUser
+	if v := get(EnvMediaMTXAPIUser); v != "" {
+		if !mediamtxUserPattern.MatchString(v) {
+			errs = append(errs, fmt.Errorf("%s: must be 1-64 characters of A-Z a-z 0-9 . _ -", EnvMediaMTXAPIUser))
+		} else {
+			cfg.MediaMTXAPIUser = v
+		}
+	}
+
+	// Not trimmed, like other passwords.
+	pw, _ := lookup(EnvMediaMTXAPIPassword)
+	switch {
+	case pw == "":
+		errs = append(errs, fmt.Errorf("%s: is required (generate one with: openssl rand -hex 32)", EnvMediaMTXAPIPassword))
+	case pw == placeholder:
+		errs = append(errs, fmt.Errorf("%s: is still the %s placeholder (generate one with: openssl rand -hex 32)", EnvMediaMTXAPIPassword, placeholder))
+	case len(pw) < minMediaMTXPasswordLen || len(pw) > 256:
+		errs = append(errs, fmt.Errorf("%s: must be %d-256 bytes", EnvMediaMTXAPIPassword, minMediaMTXPasswordLen))
+	case strings.ContainsFunc(pw, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		errs = append(errs, fmt.Errorf("%s: must not contain control characters", EnvMediaMTXAPIPassword))
+	default:
+		cfg.MediaMTXAPIPassword = Secret{s: pw}
+	}
+
+	cfg.MediaMTXSyncInterval, errs = durationVar(get, EnvMediaMTXSyncInterval, DefaultMediaMTXSyncInterval,
+		minMediaMTXSyncInterval, maxMediaMTXSyncInterval, errs)
+	return errs
 }

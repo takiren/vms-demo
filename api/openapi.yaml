@@ -21,6 +21,8 @@ tags:
     description: ログイン、ログアウト、自分のアカウント
   - name: users
     description: ユーザー管理（admin）
+  - name: cameras
+    description: カメラ管理（一覧は viewer、それ以外は admin）
 paths:
   /healthz:
     get:
@@ -234,6 +236,100 @@ paths:
           description: 削除した
         default:
           $ref: "#/components/responses/Error"
+  /cameras:
+    get:
+      operationId: listCameras
+      summary: カメラの一覧
+      description: |
+        ライブ表示に使う最小限の項目だけを返す（URL などの設定は返さない）。
+        設定は admin が `GET /cameras/{id}` で取得する。
+      tags: [cameras]
+      x-min-role: viewer
+      responses:
+        "200":
+          description: 名前の順
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CameraSummaryList"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createCamera
+      summary: カメラを登録する
+      description: |
+        URL に認証情報（`user:password@`）を入れると 400。認証情報は `credentials` で渡す（暗号化して保存し、返さない）。
+        名前が既にあれば 409。登録すると MediaMTX に path を反映する。
+      tags: [cameras]
+      x-min-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CameraCreate"
+      responses:
+        "201":
+          description: 登録した
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Camera"
+        default:
+          $ref: "#/components/responses/Error"
+  /cameras/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CameraID"
+    get:
+      operationId: getCamera
+      summary: カメラの設定を取得する
+      description: 認証情報は返さない（`has_credentials` だけ）。
+      tags: [cameras]
+      x-min-role: admin
+      responses:
+        "200":
+          description: カメラ
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Camera"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      operationId: updateCamera
+      summary: カメラの設定を変える
+      description: |
+        指定した項目だけを変える。認証情報は、`credentials` で置き換えるか `remove_credentials: true` で消す。
+        どちらもなければ今のものを残す。sub の URL は `remove_sub_url: true` で消す。
+      tags: [cameras]
+      x-min-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CameraUpdate"
+      responses:
+        "200":
+          description: 変更後のカメラ
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Camera"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteCamera
+      summary: カメラを削除する
+      description: |
+        録画が残っているカメラは削除できない（409）。録画を止めるだけなら `enabled: false` にする。
+      tags: [cameras]
+      x-min-role: admin
+      responses:
+        "204":
+          description: 削除した
+        default:
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     cookieAuth:
@@ -258,6 +354,13 @@ components:
         type: string
   parameters:
     UserID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CameraID:
       name: id
       in: path
       required: true
@@ -359,6 +462,130 @@ components:
           maxLength: 128
         new_password:
           $ref: "#/components/schemas/NewPassword"
+    CameraName:
+      type: string
+      description: 1〜100 文字。前後の空白と制御文字は不可。一意
+      minLength: 1
+      maxLength: 100
+    RtspUrl:
+      type: string
+      description: |
+        `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+        空白や ASCII 以外の文字はパーセントエンコードする。
+      minLength: 8
+      maxLength: 2048
+      pattern: "^rtsps?://"
+    RetentionDays:
+      type: integer
+      description: 録画の保持日数
+      minimum: 1
+      maximum: 3650
+    CameraCredentials:
+      type: object
+      description: RTSP の認証情報。書き込み専用（暗号化して保存し、API は返さない）
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 255
+        password:
+          type: string
+          maxLength: 255
+    CameraSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, enabled, has_sub]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          $ref: "#/components/schemas/CameraName"
+        enabled:
+          type: boolean
+        has_sub:
+          type: boolean
+          description: 多分割ライブ用の sub ストリームがあるか
+    CameraSummaryList:
+      type: object
+      additionalProperties: false
+      required: [cameras]
+      properties:
+        cameras:
+          type: array
+          items:
+            $ref: "#/components/schemas/CameraSummary"
+    Camera:
+      type: object
+      additionalProperties: false
+      required: [id, name, main_url, has_credentials, retention_days, enabled, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          $ref: "#/components/schemas/CameraName"
+        main_url:
+          $ref: "#/components/schemas/RtspUrl"
+        sub_url:
+          $ref: "#/components/schemas/RtspUrl"
+        has_credentials:
+          type: boolean
+          description: 認証情報が設定されているか（認証情報そのものは返さない）
+        retention_days:
+          $ref: "#/components/schemas/RetentionDays"
+        enabled:
+          type: boolean
+          description: false なら MediaMTX から path を外す（接続も録画もしない）
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CameraCreate:
+      type: object
+      additionalProperties: false
+      required: [name, main_url]
+      properties:
+        name:
+          $ref: "#/components/schemas/CameraName"
+        main_url:
+          $ref: "#/components/schemas/RtspUrl"
+        sub_url:
+          $ref: "#/components/schemas/RtspUrl"
+        credentials:
+          $ref: "#/components/schemas/CameraCredentials"
+        retention_days:
+          $ref: "#/components/schemas/RetentionDays"
+        enabled:
+          type: boolean
+          description: 省略時 true
+    CameraUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          $ref: "#/components/schemas/CameraName"
+        main_url:
+          $ref: "#/components/schemas/RtspUrl"
+        sub_url:
+          $ref: "#/components/schemas/RtspUrl"
+        remove_sub_url:
+          type: boolean
+          description: true なら sub の URL を消す（`sub_url` と同時には指定できない）
+        credentials:
+          $ref: "#/components/schemas/CameraCredentials"
+        remove_credentials:
+          type: boolean
+          description: true なら認証情報を消す（`credentials` と同時には指定できない）
+        retention_days:
+          $ref: "#/components/schemas/RetentionDays"
+        enabled:
+          type: boolean
     Health:
       type: object
       additionalProperties: false

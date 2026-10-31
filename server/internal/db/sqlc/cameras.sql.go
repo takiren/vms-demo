@@ -50,6 +50,48 @@ func (q *Queries) CreateCamera(ctx context.Context, arg CreateCameraParams) (Cam
 	return i, err
 }
 
+const createCameraWithID = `-- name: CreateCameraWithID :one
+INSERT INTO cameras (id, name, main_url, sub_url, credentials_enc, retention_days, enabled)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, name, main_url, sub_url, credentials_enc, retention_days, enabled, created_at, updated_at
+`
+
+type CreateCameraWithIDParams struct {
+	ID             uuid.UUID
+	Name           string
+	MainUrl        string
+	SubUrl         *string
+	CredentialsEnc []byte
+	RetentionDays  int32
+	Enabled        bool
+}
+
+// 認証情報の暗号文を ID に結び付ける（AAD）ため、ID を先に Go で決めて（UUIDv7）挿入する。
+func (q *Queries) CreateCameraWithID(ctx context.Context, arg CreateCameraWithIDParams) (Camera, error) {
+	row := q.db.QueryRow(ctx, createCameraWithID,
+		arg.ID,
+		arg.Name,
+		arg.MainUrl,
+		arg.SubUrl,
+		arg.CredentialsEnc,
+		arg.RetentionDays,
+		arg.Enabled,
+	)
+	var i Camera
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.MainUrl,
+		&i.SubUrl,
+		&i.CredentialsEnc,
+		&i.RetentionDays,
+		&i.Enabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const deleteCamera = `-- name: DeleteCamera :execrows
 DELETE FROM cameras
 WHERE id = $1
@@ -71,6 +113,29 @@ WHERE id = $1
 
 func (q *Queries) GetCamera(ctx context.Context, id uuid.UUID) (Camera, error) {
 	row := q.db.QueryRow(ctx, getCamera, id)
+	var i Camera
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.MainUrl,
+		&i.SubUrl,
+		&i.CredentialsEnc,
+		&i.RetentionDays,
+		&i.Enabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getCameraForUpdate = `-- name: GetCameraForUpdate :one
+SELECT id, name, main_url, sub_url, credentials_enc, retention_days, enabled, created_at, updated_at FROM cameras
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetCameraForUpdate(ctx context.Context, id uuid.UUID) (Camera, error) {
+	row := q.db.QueryRow(ctx, getCameraForUpdate, id)
 	var i Camera
 	err := row.Scan(
 		&i.ID,
