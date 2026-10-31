@@ -55,6 +55,12 @@ type Options struct {
 	TrustedProxies []netip.Prefix
 	// Cameras manages cameras. If nil, the camera operations respond 503.
 	Cameras CameraService
+	// HookToken is the shared secret of MediaMTX's hooks (VMS_HOOK_TOKEN).
+	// Empty disables the hook endpoints (503).
+	HookToken string
+	// Ingest receives segment-complete notifications. Nil disables the
+	// endpoint (503).
+	Ingest IngestService
 }
 
 // Handlers implements gen.StrictServerInterface.
@@ -62,6 +68,7 @@ type Handlers struct {
 	auth    AuthService
 	logger  *slog.Logger
 	cameras CameraService
+	ingest  IngestService
 }
 
 var _ gen.StrictServerInterface = (*Handlers)(nil)
@@ -102,11 +109,11 @@ func New(logger *slog.Logger, opts Options) (*echo.Echo, error) {
 		middleware.BodyLimit(MaxRequestBodyBytes),
 		clientIPMiddleware(clientip.New(opts.TrustedProxies)),
 		originCheck(opts.PublicOrigin),
-		authenticate(policies, opts.Auth, logger),
+		authenticate(policies, opts.Auth, newHookAuth(opts.HookToken), logger),
 		validator,
 	)
 
-	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras}
+	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest}
 	strict := gen.NewStrictHandler(h, []gen.StrictMiddlewareFunc{strictAuthorize(policies)})
 	gen.RegisterHandlersWithBaseURL(e, strict, BasePath)
 

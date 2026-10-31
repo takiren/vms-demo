@@ -130,11 +130,28 @@ func serve() error {
 		return err
 	}
 
+	ingestSvc, err := newIngest(logger, cfg, pool)
+	if err != nil {
+		return err
+	}
+	var ingestAPI api.IngestService
+	if ingestSvc != nil {
+		ingestAPI = ingestSvc
+		done := make(chan struct{})
+		go func() { defer close(done); ingestSvc.Run(ctx) }()
+		// Let the workers release their leases before the pool closes.
+		defer func() { <-done }()
+	} else {
+		logger.Warn("recording ingest is disabled (" + config.EnvRecordingsDir + " is not set)")
+	}
+
 	e, err := api.New(logger, api.Options{
 		Auth:           svc,
 		PublicOrigin:   cfg.PublicOrigin,
 		TrustedProxies: cfg.TrustedProxies,
 		Cameras:        cams,
+		HookToken:      cfg.Ingest.HookToken.Value(),
+		Ingest:         ingestAPI,
 	})
 	if err != nil {
 		return err

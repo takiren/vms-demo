@@ -15,6 +15,9 @@ Go による API サーバーの実装ディレクトリです。
 - `internal/mediamtx`: MediaMTX の Control API のクライアントと、DB のカメラを path に反映する reconciler
 - `internal/sealbox`: AES-256-GCM による秘密情報の暗号化（DB に保存する認証情報など）
 - `internal/testutil/pgtest`: 結合テスト用に PostgreSQL のコンテナとテストごとの DB を用意する
+- `internal/testutil/garagetest`: 結合テスト用に Garage のコンテナ（layout、キー、バケット）を用意する
+- `internal/s3store`: Garage（S3）のクライアント。アップロード、削除（DeleteObjects）、presigned URL
+- `internal/ingest`: 録画の取り込み（フック、ディレクトリ走査、サムネイル、アップロード、ローカルの削除）
 - `internal/db`: PostgreSQL の接続プールとマイグレーション
   - `migrations/`: goose の SQL マイグレーション（バイナリに埋め込み、API の起動時に適用する）
   - `queries/`: sqlc のクエリ
@@ -64,6 +67,20 @@ make dev        # air でホットリロードしながら起動する（../.env
 | `VMS_MEDIAMTX_API_USER` | | `vms-api` | Control API に名乗るユーザー名（`[A-Za-z0-9._-]`、64 文字まで） |
 | `VMS_MEDIAMTX_API_PASSWORD` | ○ | | Control API に名乗るパスワード（16〜256 バイト。`openssl rand -hex 32`） |
 | `VMS_MEDIAMTX_SYNC_INTERVAL` | | `30s` | カメラを MediaMTX に再同期する間隔（5s〜1h） |
+| `S3_ENDPOINT` | △ | | Garage の公開エンドポイント（`https://s3.<host>`）。presigned URL の署名に使う。https のみ、パスなし |
+| `S3_INTERNAL_ENDPOINT` | | `S3_ENDPOINT` | API 自身が Garage に接続する先（全部コンテナなら `http://garage:3900`） |
+| `S3_REGION` | | `garage` | Garage の `s3_region` |
+| `S3_BUCKET` | | `recordings` | バケット |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | △ | | API の Garage のキー。`S3_*` はどれかを設定したら全部必須 |
+| `VMS_RECORDINGS_DIR` | | | 録画の取り込みを有効にする。API から見た録画ディレクトリ（相対パスは作業ディレクトリから）。設定すると `S3_*` と `VMS_HOOK_TOKEN` が必須 |
+| `VMS_MEDIAMTX_RECORDINGS_DIR` | | `/recordings` | MediaMTX から見た録画ディレクトリ（通知の `segment_path` の先頭） |
+| `VMS_RECORDINGS_TIMEZONE` | | `UTC` | MediaMTX がファイル名を書くタイムゾーン（MediaMTX の TZ） |
+| `VMS_HOOK_TOKEN` | △ | | MediaMTX のフックの共有シークレット（32 文字以上）。未設定ならフックは 503 |
+| `VMS_FFMPEG_PATH` / `VMS_FFPROBE_PATH` | | `ffmpeg` / `ffprobe` | LGPL ビルドの ffmpeg / ffprobe（起動時に存在を確かめる） |
+| `VMS_INGEST_WORKERS` | | `2` | アップロードのワーカー数（1〜16） |
+| `VMS_INGEST_SCAN_INTERVAL` | | `5m` | 取りこぼしを拾うディレクトリ走査の間隔（10s 以上） |
+| `VMS_INGEST_DELETE_GRACE` | | `1h` | アップロードと登録の後、ローカルのファイルを消すまでの猶予（1h 以上） |
+| `VMS_INGEST_STALE_AGE` | | `10m` | path ごとの最新のセグメントを、書き終わったとみなす mtime からの時間（2m 以上） |
 
 不正な値や `CHANGE_ME` のままの値があると、すべての問題を表示して起動しません。
 
@@ -112,3 +129,17 @@ curl -sk -b cookies -H "Origin: https://vms.localhost" -H "Content-Type: applica
 - 同期するのは、起動時、カメラの変更時、`VMS_MEDIAMTX_SYNC_INTERVAL` ごと（MediaMTX を再起動すると Control API で足した path は消えるため）。失敗したら 1 秒から間隔までの指数バックオフでやり直す。MediaMTX が落ちていても API は起動する
 - 認証情報を復号できないカメラ（`VMS_SECRET_KEY` を変えた、など）は、MediaMTX の path をそのままにしてエラーをログに出す
 - Control API には `VMS_MEDIAMTX_API_USER` / `VMS_MEDIAMTX_API_PASSWORD` の Basic 認証で名乗る。MediaMTX は `authMethod: http` でこれを API の認証エンドポイント（#10）に問い合わせる。そのエンドポイントができるまでは、同期は 401 で失敗し続ける
+## 録画の取り込み
+
+設計は `docs/design.md` の「録画パイプライン」。
+
+- MediaMTX がセグメントを書き終えると `POST /api/internal/mediamtx/segment-complete` を呼ぶ（`X-VMS-Hook-Token`）。API は検証して `pending_uploads` に積む。取りこぼしは起動時と定期のディレクトリ走査が拾う
+- ワーカーが ffprobe で長さを測り、ffmpeg でサムネイルを作り、Garage に `<camera_id>/<YYYY>/<MM>/<DD>/<HH>/<started_at_unix_ms>.mp4`（と `.jpg`）でアップロードして `recordings` に登録する
+- ローカルのファイルは、登録してから `VMS_INGEST_DELETE_GRACE`（1 時間以上）たってから消す。Garage が落ちている間はローカルに残してリトライし続ける
+- 開発環境（API をホストで動かす）では、ホストに ffmpeg / ffprobe が要る。LGPL ビルドを使うなら Linux では `docker/ffmpeg` のイメージから `/opt/ffmpeg` を取り出す（`server.yml` の CI と同じ手順）
+- ホストの API は `S3_ENDPOINT`（Caddy の `s3.<host>`）経由で Garage に接続する。Caddy のローカル CA を信頼させておく（`deploy/README.md`）
+
+### テスト
+
+`internal/ingest` と `internal/s3store` の結合テストは、PostgreSQL と Garage（`dxflrs/garage:v2.5.0`）を testcontainers で起動する。
+ffmpeg を使うテストは `VMS_TEST_FFMPEG_DIR`（`ffmpeg` と `ffprobe` があるディレクトリ）か PATH の ffmpeg を使い、どちらもなければ飛ばす。CI では LGPL ビルドを使い、`VMS_TEST_REQUIRE_FFMPEG=1` で飛ばさせない。

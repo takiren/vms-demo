@@ -68,7 +68,7 @@ func sameOrigin(req *http.Request, publicOrigin string) bool {
 // authenticate resolves the session cookie into the request context and
 // enforces the operation's policy (default deny). It runs after routing:
 // requests that match no route pass through so Echo answers 404/405.
-func authenticate(policies *authz.Table, svc AuthService, logger *slog.Logger) echo.MiddlewareFunc {
+func authenticate(policies *authz.Table, svc AuthService, hook hookAuth, logger *slog.Logger) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			ri := c.RouteInfo()
@@ -78,6 +78,10 @@ func authenticate(policies *authz.Table, svc AuthService, logger *slog.Logger) e
 			policy, ok := policies.ForRoute(ri.Method, ri.Path)
 			if !ok {
 				return apierror.New(http.StatusForbidden, "access denied")
+			}
+			if policy.HookToken {
+				// Server-to-server: the shared secret only, never a session.
+				return hook.authenticate(c, next)
 			}
 
 			req := c.Request()
@@ -129,6 +133,12 @@ func strictAuthorize(policies *authz.Table) gen.StrictMiddlewareFunc {
 		return func(c *echo.Context, request any) (any, error) {
 			if !ok {
 				return nil, apierror.New(http.StatusForbidden, "access denied")
+			}
+			if policy.HookToken {
+				if !hookAuthenticated(c.Request().Context()) {
+					return nil, apierror.New(http.StatusUnauthorized, "authentication required")
+				}
+				return f(c, request)
 			}
 			var user *auth.User
 			if u, found := auth.UserFrom(c.Request().Context()); found {

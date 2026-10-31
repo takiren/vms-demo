@@ -111,6 +111,11 @@ type Config struct {
 	// MediaMTXSyncInterval is how often the cameras are re-applied to
 	// MediaMTX (it forgets them when it restarts).
 	MediaMTXSyncInterval time.Duration
+
+	// S3 is the object storage (Garage). See ingest.go.
+	S3 S3Config
+	// Ingest is the recording ingest pipeline. See ingest.go.
+	Ingest IngestConfig
 }
 
 // LogValue implements slog.LogValuer so that the whole config can be logged
@@ -132,6 +137,8 @@ func (c Config) LogValue() slog.Value {
 		slog.String("mediamtx_api_user", c.MediaMTXAPIUser),
 		slog.Any("mediamtx_api_password", c.MediaMTXAPIPassword),
 		slog.String("mediamtx_sync_interval", c.MediaMTXSyncInterval.String()),
+		slog.Any("s3", c.S3),
+		slog.Any("ingest", c.Ingest),
 	)
 }
 
@@ -320,6 +327,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	errs = loadMediaMTX(lookup, get, &cfg, errs)
+	errs = loadStorage(get, &cfg, errs)
 
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))

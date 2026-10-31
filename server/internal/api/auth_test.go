@@ -109,12 +109,23 @@ func TestEveryOperationEnforcesItsPolicy(t *testing.T) {
 		for method, op := range item.Operations() {
 			target := "/api" + param.ReplaceAllString(path, adminUser.ID.String())
 			public := op.Security != nil && len(*op.Security) == 0
+			hook := op.Security != nil && len(*op.Security) == 1 && (*op.Security)[0]["hookToken"] != nil
 			role, _ := op.Extensions["x-min-role"].(string)
 
 			anon := send(e, method, target, "", sameOriginReq)
 			viewer := send(e, method, target, "", sameOriginReq, withCookie(viewerToken))
 			admin := send(e, method, target, "", sameOriginReq, withCookie(adminToken))
 			switch {
+			case hook:
+				// Sessions never work; only the shared secret does.
+				for who, rec := range map[string]int{"anonymous": anon.Code, "viewer": viewer.Code, "admin": admin.Code} {
+					if rec != http.StatusUnauthorized {
+						t.Errorf("%s %s: %s got %d, want 401", method, path, who, rec)
+					}
+				}
+				if rec := send(e, method, target, "", withHeader(api.HookTokenHeader, testHookToken)); rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+					t.Errorf("%s %s: hook token got %d", method, path, rec.Code)
+				}
 			case public:
 				if anon.Code == http.StatusUnauthorized || anon.Code == http.StatusForbidden {
 					t.Errorf("%s %s is public but anonymous got %d", method, path, anon.Code)

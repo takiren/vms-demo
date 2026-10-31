@@ -23,6 +23,10 @@ tags:
     description: ユーザー管理（admin）
   - name: cameras
     description: カメラ管理（一覧は viewer、それ以外は admin）
+  - name: internal
+    description: |
+      MediaMTX から API への呼び出し（/api/internal/*）。Caddy が外から遮断している。
+      CSRF とクッキー認証の対象外で、操作ごとに独自の認証を持つ。
 paths:
   /healthz:
     get:
@@ -330,6 +334,31 @@ paths:
           description: 削除した
         default:
           $ref: "#/components/responses/Error"
+  /internal/mediamtx/segment-complete:
+    post:
+      operationId: mediamtxSegmentComplete
+      summary: 録画セグメントの完了通知（MediaMTX の runOnRecordSegmentComplete）
+      description: |
+        MediaMTX がセグメントを書き終えたときに呼ぶ（docker/mediamtx/mtx-segment-complete.sh）。
+        `segment_path` を API の録画ディレクトリに対応づけて検証し、`pending_uploads` に積む（同じファイルは 1 回だけ）。
+        - `X-VMS-Hook-Token` が `VMS_HOOK_TOKEN` と一致しなければ 401。録画の取り込みが無効（トークンが未設定）なら 503
+        - `segment_path` が録画ディレクトリの下の `cam_<uuid>_main/<YYYY-MM-DD_HH-MM-SS-ffffff>.mp4` でない、
+          シンボリックリンクを通る、`path` と合わない場合は 400。ファイルがなければ 404。カメラが登録されていなければ 404
+        - 通知を取りこぼしても、API のディレクトリ走査が拾う
+      tags: [internal]
+      security:
+        - hookToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SegmentComplete"
+      responses:
+        "204":
+          description: 受け付けた（すでに積まれていた場合も）
+        default:
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     cookieAuth:
@@ -339,6 +368,13 @@ components:
       description: |
         ログインで発行するセッション Cookie（HttpOnly、Secure、SameSite=Strict）。
         状態を変えるリクエストでは、Origin（なければ Sec-Fetch-Site: same-origin）も確認する。
+    hookToken:
+      type: apiKey
+      in: header
+      name: X-VMS-Hook-Token
+      description: |
+        MediaMTX のフックと API の共有シークレット（`VMS_HOOK_TOKEN`）。定数時間で比較する。
+        `/api/internal/*` の操作だけが使う。
   headers:
     SetSessionCookie:
       description: |
@@ -586,6 +622,26 @@ components:
           $ref: "#/components/schemas/RetentionDays"
         enabled:
           type: boolean
+    SegmentComplete:
+      type: object
+      description: MediaMTX の MTX_PATH、MTX_SEGMENT_PATH、MTX_SEGMENT_DURATION
+      additionalProperties: false
+      required: [path, segment_path]
+      properties:
+        path:
+          type: string
+          description: MediaMTX の path 名（`cam_<uuid>_main`）
+          minLength: 1
+          maxLength: 128
+        segment_path:
+          type: string
+          description: MediaMTX から見たセグメントの絶対パス（`/recordings/cam_<uuid>_main/...mp4`）
+          minLength: 1
+          maxLength: 1024
+        segment_duration:
+          type: string
+          description: Go の duration 形式（`1m0.002s`）。記録用で、長さは ffprobe で測る
+          maxLength: 64
     Health:
       type: object
       additionalProperties: false

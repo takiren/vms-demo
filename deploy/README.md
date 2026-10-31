@@ -49,6 +49,7 @@ docker compose up         # リポジトリ直下で。初回は ffmpeg のビ�
 | `127.0.0.1:8554` | テスト映像の RTSP（VLC などで見る用） |
 
 Garage の S3（3900）、RPC（3901）、Admin API（3903）、MediaMTX の HLS / WebRTC（HTTP）は公開しません。
+ホストの API は、Garage に `S3_ENDPOINT`（`https://s3.<host>`、Caddy 経由）で接続します（`S3_INTERNAL_ENDPOINT` を省略したとき）。下の CA を信頼させてください。
 
 ### Caddy のローカル CA を信頼する
 

@@ -5,12 +5,16 @@ on:
     paths:
       - "server/**"
       - "api/**"
+      # 録画取り込みの結合テストが LGPL の ffmpeg（イメージ）と testdata を使う
+      - "docker/ffmpeg/**"
       - ".github/workflows/server.yml"
   push:
     branches: [main]
     paths:
       - "server/**"
       - "api/**"
+      # 録画取り込みの結合テストが LGPL の ffmpeg（イメージ）と testdata を使う
+      - "docker/ffmpeg/**"
       - ".github/workflows/server.yml"
 
 permissions:
@@ -23,7 +27,7 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7.0.0
@@ -49,8 +53,31 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # testcontainers で PostgreSQL を起動する結合テストを含む（ubuntu-latest には Docker がある）
+      # 録画取り込みのテストは本番と同じ LGPL の ffmpeg を使う。images.yml と同じキャッシュ（scope=ffmpeg）でビルドし、
+      # /opt/ffmpeg をそのまま取り出す（RUNPATH が /opt/ffmpeg/lib なので同じパスに置く。ランナーは Ubuntu 24.04 = glibc 2.39）
+      - uses: docker/setup-buildx-action@v4.4.1
+      - name: Build ffmpeg image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: docker/ffmpeg
+          tags: vms-ffmpeg:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=ffmpeg
+          cache-to: type=gha,scope=ffmpeg,mode=max
+      - name: Install ffmpeg from the image
+        run: |
+          id="$(docker create vms-ffmpeg:ci)"
+          sudo docker cp "$id:/opt/ffmpeg" /opt/ffmpeg
+          docker rm "$id"
+          /opt/ffmpeg/bin/ffmpeg -hide_banner -version | head -n 1
+          /opt/ffmpeg/bin/ffprobe -hide_banner -version | head -n 1
+
+      # testcontainers で PostgreSQL と Garage を起動する結合テストを含む（ubuntu-latest には Docker がある）
       - name: Test
+        env:
+          VMS_TEST_FFMPEG_DIR: /opt/ffmpeg/bin
+          VMS_TEST_REQUIRE_FFMPEG: "1"
         run: make test
 
       - name: Coverage summary
