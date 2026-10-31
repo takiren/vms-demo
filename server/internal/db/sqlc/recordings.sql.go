@@ -27,7 +27,7 @@ func (q *Queries) DeleteRecordings(ctx context.Context, ids []uuid.UUID) (int64,
 }
 
 const getRecording = `-- name: GetRecording :one
-SELECT id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at FROM recordings
+SELECT id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at, init_size FROM recordings
 WHERE id = $1
 `
 
@@ -43,6 +43,7 @@ func (q *Queries) GetRecording(ctx context.Context, id uuid.UUID) (Recording, er
 		&i.SizeBytes,
 		&i.ThumbnailKey,
 		&i.CreatedAt,
+		&i.InitSize,
 	)
 	return i, err
 }
@@ -50,7 +51,7 @@ func (q *Queries) GetRecording(ctx context.Context, id uuid.UUID) (Recording, er
 const insertRecording = `-- name: InsertRecording :one
 INSERT INTO recordings (camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at
+RETURNING id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at, init_size
 `
 
 type InsertRecordingParams struct {
@@ -81,12 +82,13 @@ func (q *Queries) InsertRecording(ctx context.Context, arg InsertRecordingParams
 		&i.SizeBytes,
 		&i.ThumbnailKey,
 		&i.CreatedAt,
+		&i.InitSize,
 	)
 	return i, err
 }
 
 const listExpiredRecordings = `-- name: ListExpiredRecordings :many
-SELECT recordings.id, recordings.camera_id, recordings.started_at, recordings.ended_at, recordings.object_key, recordings.size_bytes, recordings.thumbnail_key, recordings.created_at FROM recordings
+SELECT recordings.id, recordings.camera_id, recordings.started_at, recordings.ended_at, recordings.object_key, recordings.size_bytes, recordings.thumbnail_key, recordings.created_at, recordings.init_size FROM recordings
 JOIN cameras ON cameras.id = recordings.camera_id
 WHERE recordings.ended_at < $1::timestamptz - make_interval(days => cameras.retention_days)
 ORDER BY recordings.started_at
@@ -117,6 +119,7 @@ func (q *Queries) ListExpiredRecordings(ctx context.Context, arg ListExpiredReco
 			&i.SizeBytes,
 			&i.ThumbnailKey,
 			&i.CreatedAt,
+			&i.InitSize,
 		); err != nil {
 			return nil, err
 		}
@@ -129,7 +132,7 @@ func (q *Queries) ListExpiredRecordings(ctx context.Context, arg ListExpiredReco
 }
 
 const listRecordingsInRange = `-- name: ListRecordingsInRange :many
-SELECT id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at FROM recordings
+SELECT id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at, init_size FROM recordings
 WHERE camera_id = $1
   AND started_at < $2
   AND ended_at > $3
@@ -161,6 +164,7 @@ func (q *Queries) ListRecordingsInRange(ctx context.Context, arg ListRecordingsI
 			&i.SizeBytes,
 			&i.ThumbnailKey,
 			&i.CreatedAt,
+			&i.InitSize,
 		); err != nil {
 			return nil, err
 		}
@@ -173,15 +177,16 @@ func (q *Queries) ListRecordingsInRange(ctx context.Context, arg ListRecordingsI
 }
 
 const upsertRecording = `-- name: UpsertRecording :one
-INSERT INTO recordings (camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO recordings (camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, init_size)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (object_key) DO UPDATE
 SET ended_at = EXCLUDED.ended_at,
     size_bytes = EXCLUDED.size_bytes,
-    thumbnail_key = COALESCE(EXCLUDED.thumbnail_key, recordings.thumbnail_key)
+    thumbnail_key = COALESCE(EXCLUDED.thumbnail_key, recordings.thumbnail_key),
+    init_size = EXCLUDED.init_size
 WHERE recordings.camera_id = EXCLUDED.camera_id
   AND recordings.started_at = EXCLUDED.started_at
-RETURNING id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at
+RETURNING id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at, init_size
 `
 
 type UpsertRecordingParams struct {
@@ -191,11 +196,13 @@ type UpsertRecordingParams struct {
 	ObjectKey    string
 	SizeBytes    int64
 	ThumbnailKey *string
+	InitSize     *int64
 }
 
 // UpsertRecording は取り込みのリトライで同じセグメントを登録し直しても 1 行にする（object_key で一意）。
 // 既存の行と camera_id / started_at が違う（別のセグメントがキーで衝突した）ときは更新せず、行を返さない
 // （pgx.ErrNoRows）。サムネイルの生成に失敗したリトライでは、前回のサムネイルを残す。
+// init_size（#13）は求められなかったとき NULL で、そのときは前回の値を残さない（ファイルが変わっている）。
 func (q *Queries) UpsertRecording(ctx context.Context, arg UpsertRecordingParams) (Recording, error) {
 	row := q.db.QueryRow(ctx, upsertRecording,
 		arg.CameraID,
@@ -204,6 +211,7 @@ func (q *Queries) UpsertRecording(ctx context.Context, arg UpsertRecordingParams
 		arg.ObjectKey,
 		arg.SizeBytes,
 		arg.ThumbnailKey,
+		arg.InitSize,
 	)
 	var i Recording
 	err := row.Scan(
@@ -215,6 +223,7 @@ func (q *Queries) UpsertRecording(ctx context.Context, arg UpsertRecordingParams
 		&i.SizeBytes,
 		&i.ThumbnailKey,
 		&i.CreatedAt,
+		&i.InitSize,
 	)
 	return i, err
 }
