@@ -22,7 +22,7 @@ WHERE id IN (
     LIMIT $2
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime
 `
 
 type ClaimPendingUploadsParams struct {
@@ -50,6 +50,8 @@ func (q *Queries) ClaimPendingUploads(ctx context.Context, arg ClaimPendingUploa
 			&i.NextAttemptAt,
 			&i.CreatedAt,
 			&i.UploadedAt,
+			&i.UploadedSize,
+			&i.UploadedMtime,
 		); err != nil {
 			return nil, err
 		}
@@ -99,7 +101,7 @@ func (q *Queries) EnqueuePendingUpload(ctx context.Context, localPath string) (i
 }
 
 const listOldestPendingUploads = `-- name: ListOldestPendingUploads :many
-SELECT id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at FROM pending_uploads
+SELECT id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime FROM pending_uploads
 ORDER BY created_at
 LIMIT $1
 `
@@ -122,6 +124,8 @@ func (q *Queries) ListOldestPendingUploads(ctx context.Context, limit int32) ([]
 			&i.NextAttemptAt,
 			&i.CreatedAt,
 			&i.UploadedAt,
+			&i.UploadedSize,
+			&i.UploadedMtime,
 		); err != nil {
 			return nil, err
 		}
@@ -140,7 +144,7 @@ SET attempts = attempts + 1,
     next_attempt_at = $2
 WHERE id = $3
   AND next_attempt_at = $4
-RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime
 `
 
 type MarkPendingUploadFailedParams struct {
@@ -170,6 +174,8 @@ func (q *Queries) MarkPendingUploadFailed(ctx context.Context, arg MarkPendingUp
 		&i.NextAttemptAt,
 		&i.CreatedAt,
 		&i.UploadedAt,
+		&i.UploadedSize,
+		&i.UploadedMtime,
 	)
 	return i, err
 }
@@ -177,14 +183,18 @@ func (q *Queries) MarkPendingUploadFailed(ctx context.Context, arg MarkPendingUp
 const markPendingUploadUploaded = `-- name: MarkPendingUploadUploaded :one
 UPDATE pending_uploads
 SET uploaded_at = now(),
+    uploaded_size = $1,
+    uploaded_mtime = $2,
     last_error = NULL,
-    next_attempt_at = now() + make_interval(secs => $1::double precision)
-WHERE id = $2
-  AND next_attempt_at = $3
-RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at
+    next_attempt_at = now() + make_interval(secs => $3::double precision)
+WHERE id = $4
+  AND next_attempt_at = $5
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime
 `
 
 type MarkPendingUploadUploadedParams struct {
+	UploadedSize       *int64
+	UploadedMtime      *time.Time
 	DeleteAfterSeconds float64
 	ID                 uuid.UUID
 	LeaseUntil         time.Time
@@ -193,9 +203,16 @@ type MarkPendingUploadUploadedParams struct {
 // MarkPendingUploadUploaded はアップロードと recordings への登録が済んだことを記録する（同じトランザクションで）。
 // 行は消さず、next_attempt_at を now() + delete_after_seconds にする。その時刻を過ぎて Claim されたら、
 // ワーカーはローカルのファイルを消してから DeletePendingUpload する。
+// uploaded_size / uploaded_mtime はアップロードしたファイルのサイズと mtime（消す前の照合に使う）。
 // lease_until は Claim が返した next_attempt_at。一致しなければ行を返さない（リースを失った）。
 func (q *Queries) MarkPendingUploadUploaded(ctx context.Context, arg MarkPendingUploadUploadedParams) (PendingUpload, error) {
-	row := q.db.QueryRow(ctx, markPendingUploadUploaded, arg.DeleteAfterSeconds, arg.ID, arg.LeaseUntil)
+	row := q.db.QueryRow(ctx, markPendingUploadUploaded,
+		arg.UploadedSize,
+		arg.UploadedMtime,
+		arg.DeleteAfterSeconds,
+		arg.ID,
+		arg.LeaseUntil,
+	)
 	var i PendingUpload
 	err := row.Scan(
 		&i.ID,
@@ -205,6 +222,8 @@ func (q *Queries) MarkPendingUploadUploaded(ctx context.Context, arg MarkPending
 		&i.NextAttemptAt,
 		&i.CreatedAt,
 		&i.UploadedAt,
+		&i.UploadedSize,
+		&i.UploadedMtime,
 	)
 	return i, err
 }
@@ -225,6 +244,34 @@ type ReleasePendingUploadParams struct {
 // attempts は増やさない。lease_until は Claim が返した next_attempt_at。
 func (q *Queries) ReleasePendingUpload(ctx context.Context, arg ReleasePendingUploadParams) (int64, error) {
 	result, err := q.db.Exec(ctx, releasePendingUpload, arg.ID, arg.LeaseUntil)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const requeuePendingUpload = `-- name: RequeuePendingUpload :execrows
+UPDATE pending_uploads
+SET uploaded_at = NULL,
+    uploaded_size = NULL,
+    uploaded_mtime = NULL,
+    last_error = $1,
+    next_attempt_at = now()
+WHERE id = $2
+  AND next_attempt_at = $3
+`
+
+type RequeuePendingUploadParams struct {
+	Reason     *string
+	ID         uuid.UUID
+	LeaseUntil time.Time
+}
+
+// RequeuePendingUpload はアップロード済みの行を未アップロードに戻し、すぐにアップロードし直させる。
+// 消す前の照合で、ファイルが変わっていた（アップロード後に書き足された）ときや、Garage のオブジェクトが
+// ない・サイズが違うときに使う。lease_until は Claim が返した next_attempt_at。
+func (q *Queries) RequeuePendingUpload(ctx context.Context, arg RequeuePendingUploadParams) (int64, error) {
+	result, err := q.db.Exec(ctx, requeuePendingUpload, arg.Reason, arg.ID, arg.LeaseUntil)
 	if err != nil {
 		return 0, err
 	}

@@ -72,6 +72,8 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 - サムネイルは先頭のキーフレームを 320 px 幅の JPEG にする。失敗しても動画はアップロードし（`thumbnail_key` は NULL）、`thumbnail_failed` を記録する
 - 順序は動画 → サムネイル → 同じトランザクションで `recordings` の upsert（`object_key` で一意。同じキーで開始時刻が違えば衝突としてリトライ扱い）と `pending_uploads.uploaded_at` の記録
 - 完了した行はすぐには消さない。`uploaded_at` を入れ、`next_attempt_at` を猶予（`VMS_INGEST_DELETE_GRACE`、既定・最短 1 時間）の後にする。猶予が過ぎたらワーカーがローカルのファイルを消し、それから行を消す。行がある間は、走査が同じファイルを積み直さない
+  - 消す前に確かめる: 今のファイルのサイズと mtime が、アップロードしたとき（`uploaded_size` / `uploaded_mtime`）と同じで、Garage の HEAD でオブジェクトが同じサイズで存在すること
+  - ファイルが変わっていた（書き込み中の最新セグメントを上げてしまい、後から書き足された）とき、オブジェクトがない・サイズが違うときは、消さずに未アップロードに戻してアップロードし直す（同じキーを上書きし、`recordings` のサイズと終了時刻を更新する）。HEAD が失敗したときは消さずに後でリトライする
 - 失敗したら `next_attempt_at` を指数バックオフ（5 秒から倍々、上限 5 分、ジッターあり）で先にして、いつまでもリトライする。`upload_failed` は 1 回目と 20 回ごとにだけ `events` に記録する
 - リース（既定 15 分）を失ったワーカーは、行もファイルも変更しない。シャットダウンで中断したときは、リースを手放す（`attempts` は増やさない）
 - ffmpeg / ffprobe には最小限の環境変数だけを渡す（API の環境には S3 の鍵やフックのトークンがある）。入力は `file:` を付けて渡す
@@ -119,7 +121,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 | `sessions` | セッション Cookie に対応する |
 | `cameras` | name, main_url, sub_url, credentials_enc, retention_days, enabled |
 | `recordings` | camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key。インデックスは `(camera_id, started_at)` |
-| `pending_uploads` | local_path, attempts, uploaded_at（アップロードと登録が済んだ時刻。猶予が過ぎるまで行を残す） |
+| `pending_uploads` | local_path, attempts, uploaded_at（アップロードと登録が済んだ時刻。猶予が過ぎるまで行を残す）, uploaded_size, uploaded_mtime（消す前の照合用） |
 | `events` | ディスク逼迫、アップロード失敗、カメラの切断など |
 
 - RTSP の認証情報は AES-256-GCM で暗号化する。鍵は環境変数 `VMS_SECRET_KEY` で渡す

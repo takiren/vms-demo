@@ -30,6 +30,7 @@ type fakeQueue struct {
 	// worker had re-claimed the row.
 	stealLease bool
 	released   int
+	requeued   int
 	claimErr   error
 }
 
@@ -117,7 +118,7 @@ func (q *fakeQueue) Fail(_ context.Context, row sqlc.PendingUpload, lastError st
 	return *r, true, nil
 }
 
-func (q *fakeQueue) Complete(_ context.Context, row sqlc.PendingUpload, rec sqlc.UpsertRecordingParams, deleteAfter time.Duration) (bool, error) {
+func (q *fakeQueue) Complete(_ context.Context, row sqlc.PendingUpload, rec sqlc.UpsertRecordingParams, mtime time.Time, deleteAfter time.Duration) (bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if old, ok := q.recs[rec.ObjectKey]; ok && (old.CameraID != rec.CameraID || !old.StartedAt.Equal(rec.StartedAt)) {
@@ -130,8 +131,25 @@ func (q *fakeQueue) Complete(_ context.Context, row sqlc.PendingUpload, rec sqlc
 	q.recs[rec.ObjectKey] = rec
 	now := q.now()
 	r.UploadedAt = &now
+	size := rec.SizeBytes
+	mt := mtime.Truncate(time.Microsecond)
+	r.UploadedSize, r.UploadedMtime = &size, &mt
 	r.LastError = nil
 	r.NextAttemptAt = now.Add(deleteAfter)
+	return true, nil
+}
+
+func (q *fakeQueue) Requeue(_ context.Context, row sqlc.PendingUpload, reason string) (bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	r := q.leased(row)
+	if r == nil {
+		return false, nil
+	}
+	r.UploadedAt, r.UploadedSize, r.UploadedMtime = nil, nil, nil
+	r.LastError = &reason
+	r.NextAttemptAt = q.now()
+	q.requeued++
 	return true, nil
 }
 
@@ -194,6 +212,18 @@ type fakeStore struct {
 	failSuffix string
 	// block makes Put wait for ctx (shutdown test).
 	block bool
+	// headErr makes Head fail.
+	headErr error
+}
+
+func (s *fakeStore) Head(_ context.Context, key string) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.headErr != nil {
+		return 0, false, s.headErr
+	}
+	b, ok := s.objects[key]
+	return int64(len(b)), ok, nil
 }
 
 func newFakeStore() *fakeStore {
@@ -734,5 +764,123 @@ func TestNewValidates(t *testing.T) {
 	s, err := New(o)
 	if err != nil || s.o.Backoff.Base != DefaultBackoff.Base {
 		t.Errorf("defaults not applied: %v", err)
+	}
+}
+
+// uploadAndPassGrace uploads one segment and moves past the grace period.
+func uploadAndPassGrace(t *testing.T, h *harness) (string, string) {
+	t.Helper()
+	p := h.segment(t, segName, segStart.Add(time.Minute))
+	_, _ = h.q.Enqueue(t.Context(), p)
+	h.step(t)
+	if h.q.only(t).UploadedAt == nil {
+		t.Fatal("not uploaded")
+	}
+	h.clk.Advance(testGrace)
+	return p, VideoKey(testCam, segStart)
+}
+
+func TestFileGrewAfterUploadIsReuploaded(t *testing.T) {
+	h := newHarness(t)
+	p, key := uploadAndPassGrace(t, h)
+	// MediaMTX appended to the segment after it was uploaded.
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("-more")
+	_ = f.Close()
+	_ = os.Chtimes(p, segStart.Add(2*time.Minute), segStart.Add(2*time.Minute))
+
+	h.step(t)
+	if !exists(p) {
+		t.Fatal("deleted a file that changed after upload")
+	}
+	row := h.q.only(t)
+	if row.UploadedAt != nil || h.q.requeued != 1 || !row.NextAttemptAt.Equal(h.clk.Now()) {
+		t.Fatalf("not requeued: %+v", row)
+	}
+	// The re-upload overwrites the same key and updates the recording.
+	h.step(t)
+	if got := string(h.store.objects[key]); got != "segment-more" {
+		t.Fatalf("object = %q", got)
+	}
+	if rec := h.q.recs[key]; rec.SizeBytes != int64(len("segment-more")) {
+		t.Fatalf("recording size = %d", rec.SizeBytes)
+	}
+	// Now unchanged: deleted after the next grace period.
+	h.clk.Advance(testGrace)
+	h.step(t)
+	if exists(p) || len(h.q.rows) != 0 {
+		t.Fatal("not deleted once verified")
+	}
+}
+
+func TestMtimeNewerAfterUploadIsReuploaded(t *testing.T) {
+	h := newHarness(t)
+	p, _ := uploadAndPassGrace(t, h)
+	// Same size, rewritten later.
+	_ = os.Chtimes(p, segStart.Add(5*time.Minute), segStart.Add(5*time.Minute))
+	h.step(t)
+	if !exists(p) || h.q.requeued != 1 {
+		t.Fatal("file with a newer mtime was not requeued")
+	}
+}
+
+func TestObjectMissingOrDifferentIsReuploaded(t *testing.T) {
+	for name, mutate := range map[string]func(s *fakeStore, key string){
+		"missing":       func(s *fakeStore, key string) { delete(s.objects, key) },
+		"size mismatch": func(s *fakeStore, key string) { s.objects[key] = []byte("seg") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			p, key := uploadAndPassGrace(t, h)
+			h.store.mu.Lock()
+			mutate(h.store, key)
+			h.store.mu.Unlock()
+			h.step(t)
+			if !exists(p) || h.q.requeued != 1 || h.q.only(t).UploadedAt != nil {
+				t.Fatal("not requeued")
+			}
+			h.step(t)
+			if string(h.store.objects[key]) != "segment" {
+				t.Fatalf("object not re-uploaded: %q", h.store.objects[key])
+			}
+			if !exists(p) {
+				t.Fatal("deleted right after the re-upload")
+			}
+		})
+	}
+}
+
+func TestHeadErrorKeepsFile(t *testing.T) {
+	h := newHarness(t)
+	p, _ := uploadAndPassGrace(t, h)
+	h.store.headErr = errors.New("connection refused")
+	h.step(t)
+	row := h.q.only(t)
+	if !exists(p) || row.UploadedAt == nil || row.Attempts != 1 || h.q.requeued != 0 {
+		t.Fatalf("Head error: file exists=%v row=%+v", exists(p), row)
+	}
+	// Retried later; deleted once Garage answers.
+	h.store.headErr = nil
+	h.clk.Advance(time.Minute)
+	h.step(t)
+	if exists(p) || len(h.q.rows) != 0 {
+		t.Fatal("not deleted after Garage recovered")
+	}
+}
+
+func TestIncompleteUploadStateIsRequeued(t *testing.T) {
+	h := newHarness(t)
+	p, _ := uploadAndPassGrace(t, h)
+	h.q.mu.Lock()
+	for _, r := range h.q.rows {
+		r.UploadedSize = nil
+	}
+	h.q.mu.Unlock()
+	h.step(t)
+	if !exists(p) || h.q.requeued != 1 {
+		t.Fatal("row without the uploaded size was not requeued")
 	}
 }

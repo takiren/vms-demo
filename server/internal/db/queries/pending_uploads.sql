@@ -50,14 +50,30 @@ LIMIT $1;
 -- MarkPendingUploadUploaded はアップロードと recordings への登録が済んだことを記録する（同じトランザクションで）。
 -- 行は消さず、next_attempt_at を now() + delete_after_seconds にする。その時刻を過ぎて Claim されたら、
 -- ワーカーはローカルのファイルを消してから DeletePendingUpload する。
+-- uploaded_size / uploaded_mtime はアップロードしたファイルのサイズと mtime（消す前の照合に使う）。
 -- lease_until は Claim が返した next_attempt_at。一致しなければ行を返さない（リースを失った）。
 UPDATE pending_uploads
 SET uploaded_at = now(),
+    uploaded_size = sqlc.arg(uploaded_size),
+    uploaded_mtime = sqlc.arg(uploaded_mtime),
     last_error = NULL,
     next_attempt_at = now() + make_interval(secs => sqlc.arg(delete_after_seconds)::double precision)
 WHERE id = sqlc.arg(id)
   AND next_attempt_at = sqlc.arg(lease_until)
 RETURNING *;
+
+-- name: RequeuePendingUpload :execrows
+-- RequeuePendingUpload はアップロード済みの行を未アップロードに戻し、すぐにアップロードし直させる。
+-- 消す前の照合で、ファイルが変わっていた（アップロード後に書き足された）ときや、Garage のオブジェクトが
+-- ない・サイズが違うときに使う。lease_until は Claim が返した next_attempt_at。
+UPDATE pending_uploads
+SET uploaded_at = NULL,
+    uploaded_size = NULL,
+    uploaded_mtime = NULL,
+    last_error = sqlc.arg(reason),
+    next_attempt_at = now()
+WHERE id = sqlc.arg(id)
+  AND next_attempt_at = sqlc.arg(lease_until);
 
 -- name: ReleasePendingUpload :execrows
 -- ReleasePendingUpload はシャットダウンなどで処理を中断したとき、リースを手放してすぐに取り直せるようにする。

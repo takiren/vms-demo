@@ -13,7 +13,11 @@
 //     upserts the recording and marks the row uploaded (uploaded_at) with
 //     next_attempt_at = now + the delete grace period.
 //  4. When the grace period has passed, a worker claims the row again,
-//     deletes the local file and then the row.
+//     checks that the file is unchanged since the upload (size and mtime)
+//     and that Garage has the object with the same size, then deletes the
+//     local file and the row. If the file changed or the object is missing
+//     or different, it uploads again instead; if Garage cannot be asked,
+//     it retries later. It never deletes on doubt.
 //
 // Any failure before step 3 commits schedules a retry with capped
 // exponential backoff, forever: the local file is never deleted before
@@ -43,6 +47,9 @@ import (
 // Store is what the pipeline needs from object storage (s3store.Store).
 type Store interface {
 	Put(ctx context.Context, key string, body io.ReadSeeker, size int64, contentType string) error
+	// Head returns the object's size; exists is false (nil error) when
+	// there is no such object.
+	Head(ctx context.Context, key string) (size int64, exists bool, err error)
 }
 
 // Media inspects segments (FFmpeg).
@@ -345,7 +352,7 @@ func (s *Service) process(ctx context.Context, row sqlc.PendingUpload) {
 		ObjectKey:    videoKey,
 		SizeBytes:    fi.Size(),
 		ThumbnailKey: thumbKey,
-	}, s.o.DeleteGrace)
+	}, fi.ModTime(), s.o.DeleteGrace)
 	switch {
 	case err != nil:
 		s.fail(ctx, log, row, &camID, err)
@@ -409,13 +416,16 @@ func (s *Service) removeLocal(ctx context.Context, log *slog.Logger, row sqlc.Pe
 		log.Debug("grace period has not passed yet", slog.Time("due", due))
 		return
 	}
-	_, err := s.o.Layout.Resolve(row.LocalPath)
+	seg, err := s.o.Layout.Resolve(row.LocalPath)
 	switch {
 	case errors.Is(err, ErrSegmentNotFound):
 	case err != nil:
 		s.fail(ctx, log, row, nil, fmt.Errorf("refusing to delete: %w", err))
 		return
 	default:
+		if !s.verifyUploaded(ctx, log, row, seg) {
+			return
+		}
 		if err := os.Remove(row.LocalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			s.fail(ctx, log, row, nil, fmt.Errorf("delete local segment: %w", err))
 			return
@@ -423,6 +433,67 @@ func (s *Service) removeLocal(ctx context.Context, log *slog.Logger, row sqlc.Pe
 	}
 	if s.deleteRow(ctx, log, row) {
 		log.Debug("deleted local segment after the grace period")
+	}
+}
+
+// verifyUploaded reports whether the local file may be deleted: it is the
+// same file that was uploaded (size and mtime) and Garage has an object of
+// that size. Otherwise it requeues the row for upload (or, if Garage could
+// not be asked, schedules a retry) and returns false.
+func (s *Service) verifyUploaded(ctx context.Context, log *slog.Logger, row sqlc.PendingUpload, seg Segment) bool {
+	camID := seg.CameraID
+	fi, err := os.Stat(seg.LocalPath)
+	if err != nil {
+		s.fail(ctx, log, row, &camID, fmt.Errorf("refusing to delete: %w", err))
+		return false
+	}
+	// PostgreSQL keeps microseconds.
+	mtime := fi.ModTime().Truncate(time.Microsecond)
+	switch {
+	case row.UploadedSize == nil || row.UploadedMtime == nil:
+		s.requeue(ctx, log, row, "upload state is incomplete")
+		return false
+	case fi.Size() != *row.UploadedSize || mtime.After(row.UploadedMtime.Truncate(time.Microsecond)):
+		// Typically the newest segment was taken by the stale-age rule and
+		// MediaMTX appended to it afterwards.
+		s.requeue(ctx, log, row, fmt.Sprintf("file changed after upload (size %d -> %d)", *row.UploadedSize, fi.Size()))
+		return false
+	}
+	key := VideoKey(seg.CameraID, seg.StartedAt)
+	hctx, cancel := context.WithTimeout(ctx, thumbUploadTimeout)
+	defer cancel()
+	size, exists, err := s.o.Store.Head(hctx, key)
+	switch {
+	case err != nil:
+		s.fail(ctx, log, row, &camID, fmt.Errorf("refusing to delete: check object: %w", err))
+		return false
+	case !exists:
+		s.requeue(ctx, log, row, "object is missing in storage")
+		return false
+	case size != fi.Size():
+		s.requeue(ctx, log, row, fmt.Sprintf("object size %d differs from the local file (%d)", size, fi.Size()))
+		return false
+	}
+	return true
+}
+
+// requeue marks an uploaded row for upload again instead of deleting it.
+func (s *Service) requeue(ctx context.Context, log *slog.Logger, row sqlc.PendingUpload, reason string) {
+	if ctx.Err() != nil {
+		s.release(log, row)
+		return
+	}
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbTimeout)
+	defer cancel()
+	ok, err := s.o.Queue.Requeue(dctx, row, reason)
+	switch {
+	case err != nil:
+		log.Error("requeue pending upload failed", slog.String("error", err.Error()), slog.String("reason", reason))
+	case !ok:
+		log.Warn("lost the lease before requeueing", slog.String("reason", reason))
+	default:
+		log.Warn("not deleting the local segment; uploading it again", slog.String("reason", reason))
+		s.notify()
 	}
 }
 

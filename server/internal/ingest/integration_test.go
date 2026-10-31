@@ -220,7 +220,7 @@ func TestPGQueueLease(t *testing.T) {
 	}
 	camID, _ := ParsePathName(h.camID)
 	rec := sqlc.UpsertRecordingParams{CameraID: camID, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(), ObjectKey: "k.mp4", SizeBytes: 1}
-	if ok, err := q.Complete(ctx, *row, rec, time.Hour); err != nil || ok {
+	if ok, err := q.Complete(ctx, *row, rec, time.Now(), time.Hour); err != nil || ok {
 		t.Fatalf("Complete without lease = %v, %v", ok, err)
 	}
 	// Rolled back: no recording either.
@@ -240,7 +240,7 @@ func TestPGQueueLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	row.NextAttemptAt = lease
-	if ok, err := q.Complete(ctx, *row, rec, time.Hour); err != nil || !ok {
+	if ok, err := q.Complete(ctx, *row, rec, time.Now(), time.Hour); err != nil || !ok {
 		t.Fatalf("Complete = %v, %v", ok, err)
 	}
 	if err := h.pool.QueryRow(ctx, `SELECT next_attempt_at FROM pending_uploads`).Scan(&lease); err != nil {
@@ -248,7 +248,7 @@ func TestPGQueueLease(t *testing.T) {
 	}
 	row.NextAttemptAt = lease
 	rec.SizeBytes = 2
-	if ok, err := q.Complete(ctx, *row, rec, time.Hour); err != nil || !ok {
+	if ok, err := q.Complete(ctx, *row, rec, time.Now(), time.Hour); err != nil || !ok {
 		t.Fatalf("Complete again = %v, %v", ok, err)
 	}
 	if n := countRecordings(t, h.pool); n != 1 {
@@ -261,7 +261,7 @@ func TestPGQueueLease(t *testing.T) {
 	row.NextAttemptAt = lease
 	rec.StartedAt = rec.StartedAt.Add(time.Second)
 	rec.EndedAt = rec.StartedAt
-	if _, err := q.Complete(ctx, *row, rec, time.Hour); !errors.Is(err, ErrObjectKeyConflict) {
+	if _, err := q.Complete(ctx, *row, rec, time.Now(), time.Hour); !errors.Is(err, ErrObjectKeyConflict) {
 		t.Fatalf("conflicting Complete = %v", err)
 	}
 	if err := q.Release(ctx, *row); err != nil {
@@ -282,4 +282,63 @@ func countRecordings(t *testing.T, pool *pgxpool.Pool) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// TestIngestReuploadsChangedFile checks the pre-delete verification against
+// PostgreSQL and Garage: a file that grew after upload is uploaded again
+// (same key, recording updated), and only then deleted.
+func TestIngestReuploadsChangedFile(t *testing.T) {
+	const grace = time.Second
+	h := newPGHarness(t, &fakeMedia{dur: time.Minute}, grace)
+	ctx := t.Context()
+	local := filepath.Join(h.root, h.camID, "2026-01-02_03-04-05-000000.mp4")
+	writeFile(t, local, time.Now().Add(-time.Hour))
+	if n, err := h.svc.Scan(ctx); err != nil || n != 1 {
+		t.Fatalf("Scan = %d, %v", n, err)
+	}
+	if worked, err := h.svc.processNext(ctx); err != nil || !worked {
+		t.Fatal(worked, err)
+	}
+	pending, _ := h.q.ListOldestPendingUploads(ctx, 1)
+	if len(pending) != 1 || pending[0].UploadedSize == nil || *pending[0].UploadedSize != int64(len("segment")) || pending[0].UploadedMtime == nil {
+		t.Fatalf("pending = %+v", pending)
+	}
+
+	if err := os.WriteFile(local, []byte("segment-grown"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(grace + 200*time.Millisecond)
+	if worked, err := h.svc.processNext(ctx); err != nil || !worked {
+		t.Fatal(worked, err)
+	}
+	if _, err := os.Stat(local); err != nil {
+		t.Fatal("changed file deleted")
+	}
+	pending, _ = h.q.ListOldestPendingUploads(ctx, 1)
+	if len(pending) != 1 || pending[0].UploadedAt != nil || pending[0].UploadedSize != nil {
+		t.Fatalf("not requeued: %+v", pending)
+	}
+	if worked, err := h.svc.processNext(ctx); err != nil || !worked {
+		t.Fatal(worked, err)
+	}
+	camID, _ := ParsePathName(h.camID)
+	key := VideoKey(camID, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	if size, ok, err := h.store.Head(ctx, key); err != nil || !ok || size != int64(len("segment-grown")) {
+		t.Fatalf("object = %d, %v, %v", size, ok, err)
+	}
+	if n := countRecordings(t, h.pool); n != 1 {
+		t.Fatalf("%d recordings, want 1 (same file updates in place)", n)
+	}
+	var size int64
+	if err := h.pool.QueryRow(ctx, `SELECT size_bytes FROM recordings`).Scan(&size); err != nil || size != int64(len("segment-grown")) {
+		t.Fatalf("recording size = %d, %v", size, err)
+	}
+
+	time.Sleep(grace + 200*time.Millisecond)
+	if worked, err := h.svc.processNext(ctx); err != nil || !worked {
+		t.Fatal(worked, err)
+	}
+	if _, err := os.Stat(local); !os.IsNotExist(err) {
+		t.Fatal("verified file not deleted")
+	}
 }

@@ -28,8 +28,11 @@ type Queue interface {
 	// updated row (attempts incremented).
 	Fail(ctx context.Context, row sqlc.PendingUpload, lastError string, next time.Time) (updated sqlc.PendingUpload, ok bool, err error)
 	// Complete registers the recording and marks the row uploaded, in one
-	// transaction. The row then becomes due again after deleteAfter.
-	Complete(ctx context.Context, row sqlc.PendingUpload, rec sqlc.UpsertRecordingParams, deleteAfter time.Duration) (ok bool, err error)
+	// transaction, remembering the uploaded file's size (rec.SizeBytes) and
+	// mtime. The row then becomes due again after deleteAfter.
+	Complete(ctx context.Context, row sqlc.PendingUpload, rec sqlc.UpsertRecordingParams, mtime time.Time, deleteAfter time.Duration) (ok bool, err error)
+	// Requeue turns an uploaded row back into one to upload now.
+	Requeue(ctx context.Context, row sqlc.PendingUpload, reason string) (ok bool, err error)
 	// Release gives the lease back without counting an attempt.
 	Release(ctx context.Context, row sqlc.PendingUpload) error
 	// Delete removes the row.
@@ -97,7 +100,7 @@ func (p *PGQueue) Fail(ctx context.Context, row sqlc.PendingUpload, lastError st
 }
 
 // Complete implements Queue.
-func (p *PGQueue) Complete(ctx context.Context, row sqlc.PendingUpload, rec sqlc.UpsertRecordingParams, deleteAfter time.Duration) (ok bool, err error) {
+func (p *PGQueue) Complete(ctx context.Context, row sqlc.PendingUpload, rec sqlc.UpsertRecordingParams, mtime time.Time, deleteAfter time.Duration) (ok bool, err error) {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -114,6 +117,8 @@ func (p *PGQueue) Complete(ctx context.Context, row sqlc.PendingUpload, rec sqlc
 		return false, fmt.Errorf("insert recording: %w", err)
 	}
 	_, err = q.MarkPendingUploadUploaded(ctx, sqlc.MarkPendingUploadUploadedParams{
+		UploadedSize:       &rec.SizeBytes,
+		UploadedMtime:      &mtime,
 		DeleteAfterSeconds: deleteAfter.Seconds(),
 		ID:                 row.ID,
 		LeaseUntil:         row.NextAttemptAt,
@@ -128,6 +133,12 @@ func (p *PGQueue) Complete(ctx context.Context, row sqlc.PendingUpload, rec sqlc
 		return false, err
 	}
 	return true, nil
+}
+
+// Requeue implements Queue.
+func (p *PGQueue) Requeue(ctx context.Context, row sqlc.PendingUpload, reason string) (bool, error) {
+	n, err := p.q.RequeuePendingUpload(ctx, sqlc.RequeuePendingUploadParams{Reason: &reason, ID: row.ID, LeaseUntil: row.NextAttemptAt})
+	return n > 0, err
 }
 
 // Release implements Queue.
