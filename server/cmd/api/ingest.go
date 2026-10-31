@@ -45,5 +45,9 @@ func newIngest(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) (*ing
 		ScanInterval: ic.ScanInterval,
 		DeleteGrace:  ic.DeleteGrace,
 		StaleAge:     ic.StaleAge,
+
+		DiskHighPercent:   float64(cfg.Retention.DiskHighWatermark),
+		DiskLowPercent:    float64(cfg.Retention.DiskLowWatermark),
+		DiskCheckInterval: cfg.Retention.DiskCheckInterval,
 	})
 }

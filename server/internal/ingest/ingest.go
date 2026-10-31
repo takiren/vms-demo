@@ -134,6 +134,16 @@ type Options struct {
 	PollInterval time.Duration
 	Backoff      Backoff
 	Now          func() time.Time
+
+	// DiskHighPercent enables the disk pressure job (disk.go): at or above
+	// this usage of the recordings filesystem it deletes local segments
+	// until the usage is below DiskLowPercent. 0 disables it.
+	DiskHighPercent float64
+	DiskLowPercent  float64
+	// DiskCheckInterval is how often the usage is checked.
+	DiskCheckInterval time.Duration
+	// StatFS measures the filesystem (tests). Defaults to the statfs(2) one.
+	StatFS func(path string) (DiskUsage, error)
 }
 
 // Service runs the pipeline.
@@ -141,6 +151,10 @@ type Service struct {
 	o    Options
 	log  *slog.Logger
 	wake chan struct{}
+
+	// diskMu serializes disk pressure runs; lastUnresolved is under it.
+	diskMu         sync.Mutex
+	lastUnresolved time.Time
 }
 
 // New checks opts and fills in defaults.
@@ -150,6 +164,15 @@ func New(opts Options) (*Service, error) {
 		return nil, errors.New("ingest: Layout, Queue, Store and Media are required")
 	case opts.DeleteGrace <= 0:
 		return nil, errors.New("ingest: DeleteGrace must be positive")
+	case opts.DiskHighPercent < 0 || opts.DiskHighPercent >= 100,
+		opts.DiskHighPercent > 0 && (opts.DiskLowPercent <= 0 || opts.DiskLowPercent >= opts.DiskHighPercent):
+		return nil, errors.New("ingest: need 0 < DiskLowPercent < DiskHighPercent < 100 (or DiskHighPercent 0)")
+	}
+	if opts.DiskCheckInterval <= 0 {
+		opts.DiskCheckInterval = DefaultDiskCheckInterval
+	}
+	if opts.StatFS == nil {
+		opts.StatFS = StatFS
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
@@ -181,14 +204,17 @@ func New(opts Options) (*Service, error) {
 	return &Service{o: opts, log: opts.Logger.With(slog.String("component", "ingest")), wake: make(chan struct{}, 1)}, nil
 }
 
-// Run scans the directory at once and every ScanInterval, and runs the
-// workers until ctx is done.
+// Run scans the directory at once and every ScanInterval, runs the workers
+// and, if enabled, the disk pressure job until ctx is done.
 func (s *Service) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	for range s.o.Workers {
 		wg.Go(func() { s.worker(ctx) })
 	}
 	wg.Go(func() { s.scanLoop(ctx) })
+	if s.diskEnabled() {
+		wg.Go(func() { s.diskLoop(ctx) })
+	}
 	wg.Wait()
 }
 
@@ -436,28 +462,43 @@ func (s *Service) removeLocal(ctx context.Context, log *slog.Logger, row sqlc.Pe
 	}
 }
 
-// verifyUploaded reports whether the local file may be deleted: it is the
-// same file that was uploaded (size and mtime) and Garage has an object of
-// that size. Otherwise it requeues the row for upload (or, if Garage could
-// not be asked, schedules a retry) and returns false.
+// verifyUploaded reports whether the local file may be deleted after the
+// grace period. Otherwise it requeues the row for upload (or, if Garage
+// could not be asked, schedules a retry) and returns false.
 func (s *Service) verifyUploaded(ctx context.Context, log *slog.Logger, row sqlc.PendingUpload, seg Segment) bool {
-	camID := seg.CameraID
-	fi, err := os.Stat(seg.LocalPath)
-	if err != nil {
+	reupload, err := s.checkUploaded(ctx, row, seg)
+	switch {
+	case err != nil:
+		camID := seg.CameraID
 		s.fail(ctx, log, row, &camID, fmt.Errorf("refusing to delete: %w", err))
 		return false
+	case reupload != "":
+		s.requeue(ctx, log, row, reupload)
+		return false
+	}
+	return true
+}
+
+// checkUploaded compares the local file with what was uploaded: it must be
+// the same file (size and mtime) and Garage must have an object of that
+// size. It returns "" and nil when the file may be deleted, a reason when
+// the segment must be uploaded again, or an error when that could not be
+// determined (the file could not be read, Garage could not be asked).
+// It changes nothing. Used by removeLocal and the disk pressure job.
+func (s *Service) checkUploaded(ctx context.Context, row sqlc.PendingUpload, seg Segment) (reupload string, err error) {
+	fi, err := os.Stat(seg.LocalPath)
+	if err != nil {
+		return "", err
 	}
 	// PostgreSQL keeps microseconds.
 	mtime := fi.ModTime().Truncate(time.Microsecond)
 	switch {
 	case row.UploadedSize == nil || row.UploadedMtime == nil:
-		s.requeue(ctx, log, row, "upload state is incomplete")
-		return false
+		return "upload state is incomplete", nil
 	case fi.Size() != *row.UploadedSize || mtime.After(row.UploadedMtime.Truncate(time.Microsecond)):
 		// Typically the newest segment was taken by the stale-age rule and
 		// MediaMTX appended to it afterwards.
-		s.requeue(ctx, log, row, fmt.Sprintf("file changed after upload (size %d -> %d)", *row.UploadedSize, fi.Size()))
-		return false
+		return fmt.Sprintf("file changed after upload (size %d -> %d)", *row.UploadedSize, fi.Size()), nil
 	}
 	key := VideoKey(seg.CameraID, seg.StartedAt)
 	hctx, cancel := context.WithTimeout(ctx, thumbUploadTimeout)
@@ -465,16 +506,13 @@ func (s *Service) verifyUploaded(ctx context.Context, log *slog.Logger, row sqlc
 	size, exists, err := s.o.Store.Head(hctx, key)
 	switch {
 	case err != nil:
-		s.fail(ctx, log, row, &camID, fmt.Errorf("refusing to delete: check object: %w", err))
-		return false
+		return "", fmt.Errorf("check object: %w", err)
 	case !exists:
-		s.requeue(ctx, log, row, "object is missing in storage")
-		return false
+		return "object is missing in storage", nil
 	case size != fi.Size():
-		s.requeue(ctx, log, row, fmt.Sprintf("object size %d differs from the local file (%d)", size, fi.Size()))
-		return false
+		return fmt.Sprintf("object size %d differs from the local file (%d)", size, fi.Size()), nil
 	}
-	return true
+	return "", nil
 }
 
 // requeue marks an uploaded row for upload again instead of deleting it.

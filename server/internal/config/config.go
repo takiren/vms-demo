@@ -116,6 +116,8 @@ type Config struct {
 	S3 S3Config
 	// Ingest is the recording ingest pipeline. See ingest.go.
 	Ingest IngestConfig
+	// Retention is the retention and disk pressure jobs. See retention.go.
+	Retention RetentionConfig
 }
 
 // LogValue implements slog.LogValuer so that the whole config can be logged
@@ -139,6 +141,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("mediamtx_sync_interval", c.MediaMTXSyncInterval.String()),
 		slog.Any("s3", c.S3),
 		slog.Any("ingest", c.Ingest),
+		slog.Any("retention", c.Retention),
 	)
 }
 
@@ -328,6 +331,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 
 	errs = loadMediaMTX(lookup, get, &cfg, errs)
 	errs = loadStorage(get, &cfg, errs)
+	errs = loadRetention(get, &cfg, errs)
 
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))

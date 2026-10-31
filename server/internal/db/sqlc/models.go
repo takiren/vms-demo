@@ -41,6 +41,7 @@ type PendingUpload struct {
 	UploadedAt    *time.Time
 	UploadedSize  *int64
 	UploadedMtime *time.Time
+	LeasedUntil   *time.Time
 }
 
 type Recording struct {

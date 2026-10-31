@@ -17,7 +17,8 @@ Go による API サーバーの実装ディレクトリです。
 - `internal/testutil/pgtest`: 結合テスト用に PostgreSQL のコンテナとテストごとの DB を用意する
 - `internal/testutil/garagetest`: 結合テスト用に Garage のコンテナ（layout、キー、バケット）を用意する
 - `internal/s3store`: Garage（S3）のクライアント。アップロード、削除（DeleteObjects）、presigned URL
-- `internal/ingest`: 録画の取り込み（フック、ディレクトリ走査、サムネイル、アップロード、ローカルの削除）
+- `internal/ingest`: 録画の取り込み（フック、ディレクトリ走査、サムネイル、アップロード、ローカルの削除、ディスク逼迫時の処理）
+- `internal/retention`: 保持期間ジョブ（期限切れの録画を Garage と目録から消す）
 - `internal/db`: PostgreSQL の接続プールとマイグレーション
   - `migrations/`: goose の SQL マイグレーション（バイナリに埋め込み、API の起動時に適用する）
   - `queries/`: sqlc のクエリ
@@ -81,6 +82,10 @@ make dev        # air でホットリロードしながら起動する（../.env
 | `VMS_INGEST_SCAN_INTERVAL` | | `5m` | 取りこぼしを拾うディレクトリ走査の間隔（10s 以上） |
 | `VMS_INGEST_DELETE_GRACE` | | `1h` | アップロードと登録の後、ローカルのファイルを消すまでの猶予（1h 以上） |
 | `VMS_INGEST_STALE_AGE` | | `10m` | path ごとの最新のセグメントを、書き終わったとみなす mtime からの時間（2m 以上） |
+| `VMS_RETENTION_INTERVAL` | | `10m` | 保持期間ジョブの間隔（1m〜24h）。`S3_*` を設定すると動く |
+| `VMS_DISK_HIGH_WATERMARK` | | `90` | 録画ディレクトリのファイルシステムの使用率（%、`df` の Use%）がこれ以上でローカルのセグメントを消し始める（50〜99） |
+| `VMS_DISK_LOW_WATERMARK` | | HIGH − 5 | これを下回るまで消す（1 以上、HIGH 未満） |
+| `VMS_DISK_CHECK_INTERVAL` | | `30s` | 使用率を確かめる間隔（5s〜10m） |
 
 不正な値や `CHANGE_ME` のままの値があると、すべての問題を表示して起動しません。
 
@@ -139,7 +144,23 @@ curl -sk -b cookies -H "Origin: https://vms.localhost" -H "Content-Type: applica
 - 開発環境（API をホストで動かす）では、ホストに ffmpeg / ffprobe が要る。LGPL ビルドを使うなら Linux では `docker/ffmpeg` のイメージから `/opt/ffmpeg` を取り出す（`server.yml` の CI と同じ手順）
 - ホストの API は `S3_ENDPOINT`（Caddy の `s3.<host>`）経由で Garage に接続する。Caddy のローカル CA を信頼させておく（`deploy/README.md`）
 
+### ディスク逼迫時の処理
+
+設計は `docs/design.md` の「ディスク逼迫時の処理」。取り込みが有効なときだけ動く。
+
+- 使用率は `df` の Use% と同じ `(blocks - bfree) / (blocks - bfree + bavail)`（root 用の予約ブロックは分母に入れない）
+- HIGH 以上になったら、LOW を下回るまで、(1) アップロード済みのローカルのコピー（猶予中でも。消す前に照合する）、(2) 未アップロードのセグメント、の順に古いものから消す。(2) は 1 ファイルごとに `events` の `disk_pressure`（`action: segment_discarded`）に残る
+- path ごとの最新のファイル、`pending_uploads` に行のないファイル、ワーカーが処理中の行には触らない。失敗はログに出して次の確認でやり直す（録画は止めない）
+
+## 保持期間
+
+設計は `docs/design.md` の「保持期間」。`S3_*` を設定すると、起動時と `VMS_RETENTION_INTERVAL` ごとに動く。
+
+- `ended_at` がカメラの `retention_days` より前の録画を 500 件ずつ、動画とサムネイルをまとめて DeleteObjects で消し、両方が消えた録画だけ `recordings` から消す
+- 消せなかったものは残して次の回にやり直す（ログと `events` の `retention_delete_failed`）
+- PostgreSQL の advisory lock で、複数のプロセスが同時に走らないようにする
+
 ### テスト
 
-`internal/ingest` と `internal/s3store` の結合テストは、PostgreSQL と Garage（`dxflrs/garage:v2.5.0`）を testcontainers で起動する。
+`internal/retention`、`internal/ingest` と `internal/s3store` の結合テストは、PostgreSQL と Garage（`dxflrs/garage:v2.5.0`）を testcontainers で起動する。
 ffmpeg を使うテストは `VMS_TEST_FFMPEG_DIR`（`ffmpeg` と `ffprobe` があるディレクトリ）か PATH の ffmpeg を使い、どちらもなければ飛ばす。CI では LGPL ビルドを使い、`VMS_TEST_REQUIRE_FFMPEG=1` で飛ばさせない。
