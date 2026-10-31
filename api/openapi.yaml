@@ -1,0 +1,82 @@
+openapi: 3.0.3
+info:
+  title: vms-demo API
+  version: 0.1.0
+  description: |
+    セルフホストの小規模 VMS の API。設計は docs/design.md を参照。
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: /api
+tags:
+  - name: system
+    description: 稼働状態など
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: API プロセスの死活確認
+      description: |
+        プロセスが応答できるかだけを返す（liveness）。DB などの依存先は確認しない。
+      tags: [system]
+      responses:
+        "200":
+          description: 稼働中
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  responses:
+    Error:
+      description: |
+        エラー。すべてのエラーはこの形式で返す。
+        5xx の場合、内部の詳細は含めない。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+    ErrorBody:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: 人が読むための説明。クライアントは code で分岐すること
+    ErrorCode:
+      type: string
+      description: 機械が判定するためのエラーの種類
+      enum:
+        - bad_request
+        - unauthorized
+        - forbidden
+        - not_found
+        - method_not_allowed
+        - conflict
+        - payload_too_large
+        - unsupported_media_type
+        - too_many_requests
+        - internal
+        - service_unavailable
