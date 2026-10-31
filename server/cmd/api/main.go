@@ -138,14 +138,6 @@ func serve() error {
 	if err != nil {
 		return err
 	}
-	var playbackAPI api.PlaybackService
-	if pb, err := newPlayback(logger, cfg, pool, store); err != nil {
-		return err
-	} else if pb != nil {
-		playbackAPI = pb
-	} else {
-		logger.Warn("recording playback is disabled (" + config.EnvS3Endpoint + " is not set)")
-	}
 	var ingestAPI api.IngestService
 	if ingestSvc != nil {
 		ingestAPI = ingestSvc
@@ -157,7 +149,7 @@ func serve() error {
 		logger.Warn("recording ingest is disabled (" + config.EnvRecordingsDir + " is not set)")
 	}
 
-	retentionJob, err := newRetention(logger, cfg, pool)
+	retentionJob, err := newRetention(logger, cfg, pool, store)
 	if err != nil {
 		return err
 	}
@@ -167,6 +159,15 @@ func serve() error {
 		defer func() { <-done }()
 	} else {
 		logger.Warn("the retention job is disabled (object storage is not configured)")
+	}
+
+	var playbackAPI api.PlaybackService
+	if pb, err := newPlayback(logger, cfg, pool, store); err != nil {
+		return err
+	} else if pb != nil {
+		playbackAPI = pb
+	} else {
+		logger.Warn("recording playback is disabled (" + config.EnvS3Endpoint + " is not set)")
 	}
 
 	e, err := api.New(logger, api.Options{
