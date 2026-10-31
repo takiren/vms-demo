@@ -19,6 +19,8 @@ Go による API サーバーの実装ディレクトリです。
 - `internal/s3store`: Garage（S3）のクライアント。アップロード、削除（DeleteObjects）、presigned URL
 - `internal/ingest`: 録画の取り込み（フック、ディレクトリ走査、サムネイル、アップロード、ローカルの削除、ディスク逼迫時の処理）
 - `internal/retention`: 保持期間ジョブ（期限切れの録画を Garage と目録から消す）
+- `internal/mp4`: fMP4 のトップレベルのボックスを読み、init（`ftyp` + `moov`）の長さを求める
+- `internal/playback`: 録画の再生（HLS VOD プレイリスト、タイムライン）。範囲の録画を引く `RecordingsInRange` は切り出しでも使う
 - `internal/db`: PostgreSQL の接続プールとマイグレーション
   - `migrations/`: goose の SQL マイグレーション（バイナリに埋め込み、API の起動時に適用する）
   - `queries/`: sqlc のクエリ
@@ -86,6 +88,8 @@ make dev        # air でホットリロードしながら起動する（../.env
 | `VMS_DISK_HIGH_WATERMARK` | | `90` | 録画ディレクトリのファイルシステムの使用率（%、`df` の Use%）がこれ以上でローカルのセグメントを消し始める（50〜99） |
 | `VMS_DISK_LOW_WATERMARK` | | HIGH − 5 | これを下回るまで消す（1 以上、HIGH 未満） |
 | `VMS_DISK_CHECK_INTERVAL` | | `30s` | 使用率を確かめる間隔（5s〜10m） |
+| `VMS_PLAYBACK_MAX_RANGE` | | `24h` | 再生のプレイリストとタイムラインで指定できる範囲の長さの上限（1h〜168h） |
+| `VMS_PLAYBACK_URL_TTL_MAX` | | `12h` | presigned URL の有効期限の上限（10m〜168h）。期限は「範囲の長さ + 1h」（1h 以上）で、これを超えない |
 
 不正な値や `CHANGE_ME` のままの値があると、すべての問題を表示して起動しません。
 
@@ -164,3 +168,19 @@ curl -sk -b cookies -H "Origin: https://vms.localhost" -H "Content-Type: applica
 
 `internal/retention`、`internal/ingest` と `internal/s3store` の結合テストは、PostgreSQL と Garage（`dxflrs/garage:v2.5.0`）を testcontainers で起動する。
 ffmpeg を使うテストは `VMS_TEST_FFMPEG_DIR`（`ffmpeg` と `ffprobe` があるディレクトリ）か PATH の ffmpeg を使い、どちらもなければ飛ばす。CI では LGPL ビルドを使い、`VMS_TEST_REQUIRE_FFMPEG=1` で飛ばさせない。
+
+## 録画の再生
+
+設計は `docs/design.md` の「録画再生の詳細」。`S3_*` を設定すると有効になる（未設定なら 503）。
+
+- `GET /api/cameras/{id}/playlist.m3u8?from=&to=`: HLS（fMP4）の VOD プレイリスト。セグメントは Garage の presigned URL（`S3_ENDPOINT`）で、1 つのオブジェクトをバイト範囲で init（`EXT-X-MAP`）と本体に分ける
+- `GET /api/cameras/{id}/timeline?from=&to=&max_thumbnails=`: 録画がある区間と、間引いたサムネイル
+- `from` / `to` は RFC 3339（クエリでは `+` を `%2B` にする）。範囲は `VMS_PLAYBACK_MAX_RANGE` まで、録画は 5000 件まで
+- init の長さは取り込みのときに `recordings.init_size` に保存する。NULL の行は再生のときに Garage から先頭を読んで埋める
+
+試すとき（Caddy 経由、ログイン済みの Cookie を使う）:
+
+```sh
+curl -b "__Host-vms_session=<token>" \
+  "https://vms.localhost/api/cameras/<camera_id>/playlist.m3u8?from=2026-01-02T03:00:00Z&to=2026-01-02T04:00:00Z"
+```

@@ -61,14 +61,17 @@ type Options struct {
 	// Ingest receives segment-complete notifications. Nil disables the
 	// endpoint (503).
 	Ingest IngestService
+	// Playback serves recorded video. Nil disables it (503).
+	Playback PlaybackService
 }
 
 // Handlers implements gen.StrictServerInterface.
 type Handlers struct {
-	auth    AuthService
-	logger  *slog.Logger
-	cameras CameraService
-	ingest  IngestService
+	auth     AuthService
+	logger   *slog.Logger
+	cameras  CameraService
+	ingest   IngestService
+	playback PlaybackService
 }
 
 var _ gen.StrictServerInterface = (*Handlers)(nil)
@@ -113,7 +116,7 @@ func New(logger *slog.Logger, opts Options) (*echo.Echo, error) {
 		validator,
 	)
 
-	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest}
+	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest, playback: opts.Playback}
 	strict := gen.NewStrictHandler(h, []gen.StrictMiddlewareFunc{strictAuthorize(policies)})
 	gen.RegisterHandlersWithBaseURL(e, strict, BasePath)
 

@@ -33,6 +33,9 @@ var expected = map[string]string{
 	"updateCamera":      "admin",
 	"deleteCamera":      "admin",
 
+	"getCameraPlaylist": "viewer",
+	"getCameraTimeline": "viewer",
+
 	"mediamtxSegmentComplete": "hookToken",
 }
 
