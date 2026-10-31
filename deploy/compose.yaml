@@ -1,0 +1,163 @@
+# 開発用のインフラ（Caddy、Postgres、Garage、MediaMTX、テスト映像）。
+# API（air）と web（vite dev）はホストで動かし、Caddy から host.docker.internal で到達する。
+# 起動はリポジトリ直下で `docker compose up`（compose.yaml がこのファイルを include し、.env で展開する）。
+# 使い方は deploy/README.md。
+
+x-host-gateway: &host-gateway
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
+services:
+  caddy:
+    image: caddy:2.11.7-alpine
+    <<: *host-gateway
+    ports:
+      - ${CADDY_HTTP_PORT:-80}:80
+      - ${CADDY_HTTPS_PORT:-443}:443
+    environment:
+      VMS_HOST: ${VMS_HOST:?set VMS_HOST in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      # 管理 API はコンテナ内の localhost だけ
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:2019/config/]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    depends_on:
+      mediamtx:
+        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
+
+  postgres:
+    # testcontainers と同じイメージ。uuidv7() のため 18 以上
+    image: postgres:18.6-alpine
+    ports:
+      - 127.0.0.1:5432:5432
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -h 127.0.0.1]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  garage:
+    image: dxflrs/garage:v2.5.0
+    # ports は書かない（S3 は Caddy の s3.<host> 経由。RPC と Admin API は外に出さない）
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?set GARAGE_RPC_SECRET in .env}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?set GARAGE_ADMIN_TOKEN in .env}
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    healthcheck:
+      # イメージにシェルがないので garage 自身で確認する（RPC で自ノードに接続できるか）
+      test: [CMD, /garage, status]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  garage-init:
+    # layout、キー、バケット、CORS を冪等に設定して終わる（deploy/garage-init/init.py）
+    image: python:3.13.18-alpine
+    command: [python, -I, /init/init.py]
+    restart: "no"
+    environment:
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
+      GARAGE_CAPACITY: ${GARAGE_CAPACITY:-100G}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+      S3_REGION: ${S3_REGION:-garage}
+      S3_BUCKET: ${S3_BUCKET:-recordings}
+      VMS_HOST: ${VMS_HOST}
+    volumes:
+      - ./garage-init:/init:ro
+    depends_on:
+      garage:
+        condition: service_healthy
+
+  # docker/mediamtx が FROM で使う ffmpeg のイメージ。ビルドの順序をつけるためのサービス
+  # （mediamtx の additional_contexts で service:ffmpeg として参照する）。起動するとバージョンを出して終わる
+  ffmpeg:
+    image: vms-ffmpeg:local
+    build: ../docker/ffmpeg
+    command: [-hide_banner, -version]
+    restart: "no"
+
+  recordings-init:
+    # bind mount の録画ディレクトリを作り、MediaMTX のユーザーのものにする
+    # （Docker が作るとき root のものになるので）。イメージは garage-init と同じものを使い回す
+    image: python:3.13.18-alpine
+    user: "0:0"
+    entrypoint: [/bin/sh, -c]
+    command:
+      - mkdir -p /recordings && chown "$$UID_GID" /recordings && chmod 0750 /recordings
+    environment:
+      UID_GID: ${MEDIAMTX_UID:-10001}:${MEDIAMTX_GID:-10001}
+    volumes:
+      - ./data/recordings:/recordings
+    restart: "no"
+
+  mediamtx:
+    image: vms-mediamtx:local
+    build:
+      context: ../docker/mediamtx
+      args:
+        FFMPEG_IMAGE: vms-ffmpeg
+      additional_contexts:
+        vms-ffmpeg: service:ffmpeg
+    <<: *host-gateway
+    user: ${MEDIAMTX_UID:-10001}:${MEDIAMTX_GID:-10001}
+    ports:
+      # Control API はホストの API のためだけに 127.0.0.1 へ。HLS / WebRTC（HTTP）は Caddy 経由
+      - 127.0.0.1:9997:9997
+      # WebRTC のメディアは直接
+      - ${MTX_WEBRTC_BIND:-127.0.0.1}:8189:8189/udp
+      - ${MTX_WEBRTC_BIND:-127.0.0.1}:8189:8189/tcp
+    environment:
+      VMS_HOOK_TOKEN: ${VMS_HOOK_TOKEN:?set VMS_HOOK_TOKEN in .env}
+      MTX_AUTHHTTPADDRESS: ${MTX_AUTHHTTPADDRESS:-http://host.docker.internal:8080/api/internal/mediamtx/auth}
+      MTX_WEBRTCADDITIONALHOSTS: ${MTX_WEBRTCADDITIONALHOSTS:-}
+    volumes:
+      - ./mediamtx.yml:/etc/mediamtx/mediamtx.yml:ro
+      - ./data/recordings:/recordings
+    healthcheck:
+      # HLS のサーバーが応答するか（Control API は認証の問い合わせが走るので使わない）
+      test: [CMD, curl, -s, -o, /dev/null, http://127.0.0.1:8888/]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      ffmpeg:
+        condition: service_completed_successfully
+      recordings-init:
+        condition: service_completed_successfully
+
+  testsrc:
+    # テスト映像（rtsp://testsrc:8554/main と /sub）。docker/testsrc/README.md
+    image: vms-testsrc:local
+    build: ../docker/testsrc
+    ports:
+      # ホストの VLC などで見る用
+      - 127.0.0.1:8554:8554
+    healthcheck:
+      test: [CMD, healthcheck, sub]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:
+  garage-meta:
+  garage-data:

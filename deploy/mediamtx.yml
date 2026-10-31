@@ -25,6 +25,8 @@ playback: false
 rtsp: false
 rtmp: false
 srt: false
+# MoQ（Media over QUIC）。既定で有効で、カレントディレクトリに auto.key / auto.crt を書こうとする
+moq: false
 
 # ライブ配信（Caddy の /live/ の裏）。同一オリジンなので CORS は許可しない。
 hls: true

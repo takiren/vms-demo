@@ -1,0 +1,25 @@
+# Garage（v2.5 系）の設定。単一ノード、replication_factor = 1。
+# 秘密情報はここに書かない。rpc_secret と admin_token は環境変数
+# GARAGE_RPC_SECRET / GARAGE_ADMIN_TOKEN（.env）で渡す。
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+metadata_auto_snapshot_interval = "6h"
+
+replication_factor = 1
+
+# RPC はコンテナの中だけ（ports に書かない）
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+# Caddy の s3.<host> の裏。presigned URL は Host とパスを署名に含むので、
+# Caddy は Host を書き換えずに渡し、パスのプレフィックスでは振り分けない。
+# バケットはパス形式（https://s3.<host>/recordings/...）で使う。root_domain は設定しない。
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+
+[admin]
+# init コンテナだけが使う。ports に書かない
+api_bind_addr = "[::]:3903"
