@@ -16,6 +16,7 @@ import (
 
 	"github.com/takiren/vms-demo/server/internal/api"
 	"github.com/takiren/vms-demo/server/internal/config"
+	"github.com/takiren/vms-demo/server/internal/db"
 )
 
 func main() {
@@ -36,13 +37,23 @@ func run() error {
 	slog.SetDefault(logger)
 	logger.Info("starting api", slog.Any("config", cfg))
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Fail fast: without the database (and an up-to-date schema) nothing works.
+	pool, err := db.Open(ctx, cfg.DatabaseURL.Value())
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := db.Migrate(ctx, pool, logger); err != nil {
+		return err
+	}
+
 	e, err := api.New(logger, &api.Handlers{})
 	if err != nil {
 		return err
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	sc := echo.StartConfig{
 		Address:         cfg.ListenAddr,
