@@ -60,6 +60,22 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 5. Garage に障害があるときは、ローカルに溜めてリトライし続ける
 6. ディスク使用率が 90% を超えたら、未アップロードの古いものから捨てて `events` に記録する。録画は止めない
 
+### 取り込みの詳細
+
+- フック（`POST /api/internal/mediamtx/segment-complete`）は `X-VMS-Hook-Token` を `VMS_HOOK_TOKEN` と定数時間で比較する。トークンが未設定ならエンドポイントは 503（開かない）
+- パスの検証（フックとディレクトリ走査の両方、削除の前にも）
+  - MediaMTX から見たディレクトリ（`/recordings`）と API から見たディレクトリ（開発ではホストの `deploy/data/recordings`）は違う。相対パスで対応づける
+  - `<録画ディレクトリ>/cam_<uuid>_main/<YYYY-MM-DD_HH-MM-SS-ffffff>.mp4` の形だけを受け付ける。`.` `..` を含むもの、シンボリックリンクを通るもの、通常のファイルでないものは拒否する。カメラが DB にないものも積まない
+- ディレクトリ走査は起動時と定期（既定 5 分）。書き込み中のセグメントは拾わない
+  - MediaMTX は path ごとに 1 つずつ書くので、書き込み中になりうるのは path ごとに一番新しいファイルだけ。それは mtime が `VMS_INGEST_STALE_AGE`（既定 10 分）より古いとき（録画が止まった）だけ拾う。ほかのファイルも mtime が 15 秒以上前のものに限る
+- 開始時刻はファイル名から取る。MediaMTX はファイル名をプロセスのローカル時刻（コンテナの TZ。既定は UTC）で書くので、`VMS_RECORDINGS_TIMEZONE`（既定 UTC）で解釈して UTC で保存する。長さは ffprobe で映像のパケットの時刻から測る（fMP4 のヘッダーには全体の長さがない）。ffprobe が失敗したら mtime から推定する
+- サムネイルは先頭のキーフレームを 320 px 幅の JPEG にする。失敗しても動画はアップロードし（`thumbnail_key` は NULL）、`thumbnail_failed` を記録する
+- 順序は動画 → サムネイル → 同じトランザクションで `recordings` の upsert（`object_key` で一意。同じキーで開始時刻が違えば衝突としてリトライ扱い）と `pending_uploads.uploaded_at` の記録
+- 完了した行はすぐには消さない。`uploaded_at` を入れ、`next_attempt_at` を猶予（`VMS_INGEST_DELETE_GRACE`、既定・最短 1 時間）の後にする。猶予が過ぎたらワーカーがローカルのファイルを消し、それから行を消す。行がある間は、走査が同じファイルを積み直さない
+- 失敗したら `next_attempt_at` を指数バックオフ（5 秒から倍々、上限 5 分、ジッターあり）で先にして、いつまでもリトライする。`upload_failed` は 1 回目と 20 回ごとにだけ `events` に記録する
+- リース（既定 15 分）を失ったワーカーは、行もファイルも変更しない。シャットダウンで中断したときは、リースを手放す（`attempts` は増やさない）
+- ffmpeg / ffprobe には最小限の環境変数だけを渡す（API の環境には S3 の鍵やフックのトークンがある）。入力は `file:` を付けて渡す
+
 ### 保持期間
 
 - 保持期間はカメラごとの `retention_days`（デフォルト 7 日）
@@ -74,6 +90,9 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
   - 動画: `<camera_id>/<YYYY>/<MM>/<DD>/<HH>/<started_at_unix_ms>.mp4`
   - サムネイル: 動画と同じキーで拡張子が `.jpg`
 - layout、キー、バケット、CORS は init コンテナで冪等に設定する。キーは `.env` で固定する
+- API は 2 つのエンドポイントを使い分ける（クライアントは aws-sdk-go-v2、パス形式）
+  - `S3_ENDPOINT`（`https://s3.<host>`）: presigned URL の署名だけに使う。ブラウザが使うホストで署名しないと壊れる
+  - `S3_INTERNAL_ENDPOINT`: API 自身のアップロードと削除。全部コンテナの構成では `http://garage:3900`。開発（API はホスト）では省略して `S3_ENDPOINT`（Caddy 経由）を使う。Garage の 3900 はホストに公開しない
 
 ## 再生
 
@@ -100,7 +119,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 | `sessions` | セッション Cookie に対応する |
 | `cameras` | name, main_url, sub_url, credentials_enc, retention_days, enabled |
 | `recordings` | camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key。インデックスは `(camera_id, started_at)` |
-| `pending_uploads` | local_path, attempts |
+| `pending_uploads` | local_path, attempts, uploaded_at（アップロードと登録が済んだ時刻。猶予が過ぎるまで行を残す） |
 | `events` | ディスク逼迫、アップロード失敗、カメラの切断など |
 
 - RTSP の認証情報は AES-256-GCM で暗号化する。鍵は環境変数 `VMS_SECRET_KEY` で渡す
