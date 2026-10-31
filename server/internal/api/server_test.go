@@ -2,7 +2,6 @@ package api_test
 
 import (
 	"bytes"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,17 +10,13 @@ import (
 	"github.com/labstack/echo/v5"
 
 	"github.com/takiren/vms-demo/server/internal/api"
+	"github.com/takiren/vms-demo/server/internal/auth"
 )
 
 func newServer(t *testing.T) (*echo.Echo, *bytes.Buffer) {
 	t.Helper()
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	e, err := api.New(logger, &api.Handlers{})
-	if err != nil {
-		t.Fatalf("api.New: %v", err)
-	}
-	return e, &logs
+	e, logs, _ := newServerWithFake(t)
+	return e, logs
 }
 
 func do(e *echo.Echo, method, target, body string) *httptest.ResponseRecorder {
@@ -89,9 +84,11 @@ func TestBodyLimit(t *testing.T) {
 
 func TestPanicBecomesInternalError(t *testing.T) {
 	e, logs := newServer(t)
-	e.GET("/api/test-panic", func(*echo.Context) error { panic("boom: secret detail") })
-
-	rec := do(e, http.MethodGet, "/api/test-panic", "")
+	// The fake auth service panics for this session token.
+	req := httptest.NewRequest(http.MethodGet, "/api/healthz", nil)
+	req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: panicToken})
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d", rec.Code)
 	}

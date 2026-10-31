@@ -101,6 +101,27 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 	return i, err
 }
 
+const getUserForUpdate = `-- name: GetUserForUpdate :one
+SELECT id, username, password_hash, role, created_at, updated_at FROM users
+WHERE id = $1
+FOR UPDATE
+`
+
+// GetUserForUpdate はトランザクションの中で対象のユーザーの行をロックして返す。
+func (q *Queries) GetUserForUpdate(ctx context.Context, id uuid.UUID) (User, error) {
+	row := q.db.QueryRow(ctx, getUserForUpdate, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.PasswordHash,
+		&i.Role,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, username, password_hash, role, created_at, updated_at FROM users
 ORDER BY lower(username)
@@ -131,6 +152,69 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockAdminBootstrap = `-- name: LockAdminBootstrap :exec
+SELECT pg_advisory_xact_lock(hashtextextended('vms-demo:bootstrap-admin', 0))
+`
+
+// LockAdminBootstrap は初期 admin の作成をトランザクションの間だけ直列にする（advisory lock）。
+func (q *Queries) LockAdminBootstrap(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockAdminBootstrap)
+	return err
+}
+
+const lockAdmins = `-- name: LockAdmins :many
+SELECT id FROM users
+WHERE role = 'admin'
+ORDER BY id
+FOR UPDATE
+`
+
+// LockAdmins は admin の行をすべてロックして ID を返す。最後の admin を消したり降格したりしないための
+// 判定に使う。同時に実行されたトランザクションは、先のトランザクションが終わるまで待ち、
+// その結果（降格・削除済みの行は除かれる）を見て判定する。デッドロックを避けるため ID の順にロックする。
+func (q *Queries) LockAdmins(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, lockAdmins)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const rehashUserPassword = `-- name: RehashUserPassword :execrows
+UPDATE users
+SET password_hash = $1
+WHERE id = $2
+  AND password_hash = $3
+`
+
+type RehashUserPasswordParams struct {
+	NewHash string
+	ID      uuid.UUID
+	OldHash string
+}
+
+// RehashUserPassword はログイン時にパラメーターの古いハッシュを作り直す。
+// 検証したハッシュがまだ保存されている場合だけ書き換える（同時に変更されたパスワードを上書きしない）。
+func (q *Queries) RehashUserPassword(ctx context.Context, arg RehashUserPasswordParams) (int64, error) {
+	result, err := q.db.Exec(ctx, rehashUserPassword, arg.NewHash, arg.ID, arg.OldHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateUserPassword = `-- name: UpdateUserPassword :one

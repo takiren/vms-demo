@@ -9,9 +9,18 @@ info:
     url: https://www.apache.org/licenses/LICENSE-2.0
 servers:
   - url: /api
+# 既定で認証を要求する（docs/design.md の「認可」）。認証の要らない操作だけ `security: []` で外す。
+# 認証が要る操作には、必要な最低ロールを `x-min-role`（admin / viewer）で必ず書く。
+# viewer はログインしていれば誰でもよい。書き忘れると API が起動しない。
+security:
+  - cookieAuth: []
 tags:
   - name: system
     description: 稼働状態など
+  - name: auth
+    description: ログイン、ログアウト、自分のアカウント
+  - name: users
+    description: ユーザー管理（admin）
 paths:
   /healthz:
     get:
@@ -20,6 +29,7 @@ paths:
       description: |
         プロセスが応答できるかだけを返す（liveness）。DB などの依存先は確認しない。
       tags: [system]
+      security: []
       responses:
         "200":
           description: 稼働中
@@ -29,7 +39,231 @@ paths:
                 $ref: "#/components/schemas/Health"
         default:
           $ref: "#/components/responses/Error"
+  /auth/login:
+    post:
+      operationId: login
+      summary: ログイン
+      description: |
+        ユーザー名とパスワードを検証し、新しいセッションを発行して Cookie に入れる。
+        ユーザー名が存在しない場合も、パスワードが違う場合と同じ 401 を返す。
+        失敗が続くと 429 を返す（ユーザー名ごと、接続元 IP ごと）。
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: ログインした。セッション Cookie を設定する
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SetSessionCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "429":
+          description: 失敗が多すぎる。Retry-After 秒後まで受け付けない
+          headers:
+            Retry-After:
+              description: 再試行できるまでの秒数
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: ログアウト
+      description: |
+        送られてきたセッションを消し、Cookie を消す。ログインしていなくても 204 を返す。
+      tags: [auth]
+      security: []
+      responses:
+        "204":
+          description: ログアウトした
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/ClearSessionCookie"
+        default:
+          $ref: "#/components/responses/Error"
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: ログイン中のユーザー
+      tags: [auth]
+      x-min-role: viewer
+      responses:
+        "200":
+          description: ログイン中のユーザー
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        default:
+          $ref: "#/components/responses/Error"
+  /auth/password:
+    post:
+      operationId: changeOwnPassword
+      summary: 自分のパスワードを変える
+      description: |
+        現在のパスワードが必要。変更すると、自分のセッションをすべて消し、新しいセッションを発行する。
+        現在のパスワードが違う場合は 400。失敗が続くと 429。
+      tags: [auth]
+      x-min-role: viewer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "204":
+          description: 変更した。新しいセッション Cookie を設定する
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SetSessionCookie"
+        "429":
+          description: 失敗が多すぎる。Retry-After 秒後まで受け付けない
+          headers:
+            Retry-After:
+              description: 再試行できるまでの秒数
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /users:
+    get:
+      operationId: listUsers
+      summary: ユーザーの一覧
+      tags: [users]
+      x-min-role: admin
+      responses:
+        "200":
+          description: ユーザー名の順（大文字小文字を区別しない）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserList"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createUser
+      summary: ユーザーを作る
+      description: ユーザー名が（大文字小文字を区別せずに）既にあれば 409。
+      tags: [users]
+      x-min-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserCreate"
+      responses:
+        "201":
+          description: 作った
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        default:
+          $ref: "#/components/responses/Error"
+  /users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UserID"
+    get:
+      operationId: getUser
+      summary: ユーザーを取得する
+      tags: [users]
+      x-min-role: admin
+      responses:
+        "200":
+          description: ユーザー
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      operationId: updateUser
+      summary: ユーザーのロールやパスワードを変える
+      description: |
+        ロールかパスワードを変えると、そのユーザーのセッションをすべて消す。
+        最後の admin を降格しようとすると 409。
+      tags: [users]
+      x-min-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserUpdate"
+      responses:
+        "200":
+          description: 変更後のユーザー
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteUser
+      summary: ユーザーを削除する
+      description: 自分自身と、最後の admin は削除できない（409）。
+      tags: [users]
+      x-min-role: admin
+      responses:
+        "204":
+          description: 削除した
+        default:
+          $ref: "#/components/responses/Error"
 components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: __Host-vms_session
+      description: |
+        ログインで発行するセッション Cookie（HttpOnly、Secure、SameSite=Strict）。
+        状態を変えるリクエストでは、Origin（なければ Sec-Fetch-Site: same-origin）も確認する。
+  headers:
+    SetSessionCookie:
+      description: |
+        セッション Cookie。`__Host-vms_session=<token>; Path=/; HttpOnly; Secure; SameSite=Strict`
+      required: true
+      schema:
+        type: string
+    ClearSessionCookie:
+      description: |
+        セッション Cookie を消す。`__Host-vms_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`
+      required: true
+      schema:
+        type: string
+  parameters:
+    UserID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
   responses:
     Error:
       description: |
@@ -40,6 +274,91 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    Username:
+      type: string
+      description: ASCII の英数字と `.` `_` `-`。大文字小文字を区別せずに一意
+      minLength: 1
+      maxLength: 64
+      pattern: "^[A-Za-z0-9._-]{1,64}$"
+    NewPassword:
+      type: string
+      description: |
+        Unicode のコードポイントで 12 文字以上 128 文字以下。文字種の条件はない。
+      minLength: 12
+      maxLength: 128
+    Role:
+      type: string
+      description: admin は全操作、viewer は閲覧だけ
+      enum: [admin, viewer]
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, username, role, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          $ref: "#/components/schemas/Username"
+        role:
+          $ref: "#/components/schemas/Role"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    UserList:
+      type: object
+      additionalProperties: false
+      required: [users]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+    UserCreate:
+      type: object
+      additionalProperties: false
+      required: [username, password, role]
+      properties:
+        username:
+          $ref: "#/components/schemas/Username"
+        password:
+          $ref: "#/components/schemas/NewPassword"
+        role:
+          $ref: "#/components/schemas/Role"
+    UserUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        role:
+          $ref: "#/components/schemas/Role"
+        password:
+          $ref: "#/components/schemas/NewPassword"
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          $ref: "#/components/schemas/Username"
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+          maxLength: 128
+        new_password:
+          $ref: "#/components/schemas/NewPassword"
     Health:
       type: object
       additionalProperties: false

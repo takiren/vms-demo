@@ -116,10 +116,16 @@ func TestSessions(t *testing.T) {
 	ctx := t.Context()
 	user := createUser(t, q, "alice", "admin")
 	h := sha256.Sum256([]byte("token"))
+	create := func(hash []byte, userID uuid.UUID, pwHash string, ttl float64) (sqlc.Session, error) {
+		return q.CreateSession(ctx, sqlc.CreateSessionParams{UserID: userID, TokenHash: hash, PasswordHash: pwHash, TtlSeconds: ttl})
+	}
 
-	s, err := q.CreateSession(ctx, sqlc.CreateSessionParams{UserID: user.ID, TokenHash: h[:], ExpiresAt: time.Now().Add(time.Hour)})
+	s, err := create(h[:], user.ID, testHash, 3600)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if d := s.ExpiresAt.Sub(s.CreatedAt); d < 3599*time.Second || d > 3601*time.Second {
+		t.Errorf("expires_at - created_at = %v, want 1h", d)
 	}
 	row, err := q.GetSessionByTokenHash(ctx, h[:])
 	if err != nil || row.Session.ID != s.ID || row.User.ID != user.ID {
@@ -127,25 +133,42 @@ func TestSessions(t *testing.T) {
 	}
 
 	// Only a 32-byte digest is accepted, never a raw token.
-	_, err = q.CreateSession(ctx, sqlc.CreateSessionParams{UserID: user.ID, TokenHash: []byte("raw-token"), ExpiresAt: time.Now().Add(time.Hour)})
+	_, err = create([]byte("raw-token"), user.ID, testHash, 3600)
 	wantPgError(t, err, "23514")
-	_, err = q.CreateSession(ctx, sqlc.CreateSessionParams{UserID: user.ID, TokenHash: h[:], ExpiresAt: time.Now().Add(time.Hour)})
+	_, err = create(h[:], user.ID, testHash, 3600)
 	wantPgError(t, err, "23505")
-	_, err = q.CreateSession(ctx, sqlc.CreateSessionParams{UserID: uuid.Must(uuid.NewV7()), TokenHash: make([]byte, 32), ExpiresAt: time.Now().Add(time.Hour)})
-	wantPgError(t, err, "23503")
+	// No session for an unknown user, or when the password hash changed
+	// since it was verified.
+	other := sha256.Sum256([]byte("other"))
+	if _, err := create(other[:], uuid.Must(uuid.NewV7()), testHash, 3600); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("unknown user: %v", err)
+	}
+	if _, err := create(other[:], user.ID, testHash+"stale", 3600); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("stale password hash: %v", err)
+	}
 
-	newExpiry := time.Now().Add(2 * time.Hour).Truncate(time.Microsecond)
-	if n, err := q.TouchSession(ctx, sqlc.TouchSessionParams{ID: s.ID, ExpiresAt: newExpiry}); err != nil || n != 1 {
+	// Touch slides the expiry to now + idle, capped at created_at + max.
+	if n, err := q.TouchSession(ctx, sqlc.TouchSessionParams{ID: s.ID, IdleSeconds: 7200, MaxLifetimeSeconds: 86400}); err != nil || n != 1 {
 		t.Fatalf("touch = %d, %v", n, err)
 	}
 	row, _ = q.GetSessionByTokenHash(ctx, h[:])
-	if !row.Session.ExpiresAt.Equal(newExpiry) || !row.Session.LastSeenAt.After(s.LastSeenAt) {
-		t.Fatalf("touch did not update: %+v", row.Session)
+	if d := row.Session.ExpiresAt.Sub(row.Session.LastSeenAt); d < 7199*time.Second || d > 7201*time.Second {
+		t.Fatalf("touch did not slide to idle: %+v", row.Session)
+	}
+	if !row.Session.LastSeenAt.After(s.LastSeenAt) {
+		t.Fatalf("touch did not update last_seen_at: %+v", row.Session)
+	}
+	if n, err := q.TouchSession(ctx, sqlc.TouchSessionParams{ID: s.ID, IdleSeconds: 7200, MaxLifetimeSeconds: 600}); err != nil || n != 1 {
+		t.Fatalf("touch = %d, %v", n, err)
+	}
+	row, _ = q.GetSessionByTokenHash(ctx, h[:])
+	if !row.Session.ExpiresAt.Equal(row.Session.CreatedAt.Add(600 * time.Second)) {
+		t.Fatalf("touch went past the absolute limit: %+v", row.Session)
 	}
 
 	// An expired session is invisible, cannot be touched and is cleaned up.
 	exp := sha256.Sum256([]byte("expired"))
-	expired, err := q.CreateSession(ctx, sqlc.CreateSessionParams{UserID: user.ID, TokenHash: exp[:], ExpiresAt: time.Now().Add(50 * time.Millisecond)})
+	expired, err := create(exp[:], user.ID, testHash, 0.05)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +176,7 @@ func TestSessions(t *testing.T) {
 	if _, err := q.GetSessionByTokenHash(ctx, exp[:]); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("expired session returned: %v", err)
 	}
-	if n, err := q.TouchSession(ctx, sqlc.TouchSessionParams{ID: expired.ID, ExpiresAt: newExpiry}); err != nil || n != 0 {
+	if n, err := q.TouchSession(ctx, sqlc.TouchSessionParams{ID: expired.ID, IdleSeconds: 3600, MaxLifetimeSeconds: 86400}); err != nil || n != 0 {
 		t.Fatalf("touch expired = %d, %v", n, err)
 	}
 	if n, err := q.DeleteExpiredSessions(ctx); err != nil || n != 1 {
@@ -164,16 +187,24 @@ func TestSessions(t *testing.T) {
 		t.Fatalf("delete by hash = %d, %v", n, err)
 	}
 
+	byID, err := create(other[:], user.ID, testHash, 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := q.DeleteSession(ctx, byID.ID); err != nil || n != 1 {
+		t.Fatalf("delete by id = %d, %v", n, err)
+	}
+
 	// Sessions go away with their user (ON DELETE CASCADE).
 	h2 := sha256.Sum256([]byte("token2"))
-	if _, err := q.CreateSession(ctx, sqlc.CreateSessionParams{UserID: user.ID, TokenHash: h2[:], ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if _, err := create(h2[:], user.ID, testHash, 3600); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := q.DeleteSessionsByUser(ctx, user.ID); err != nil || n != 1 {
 		t.Fatalf("delete by user = %d, %v", n, err)
 	}
 	h3 := sha256.Sum256([]byte("token3"))
-	if _, err := q.CreateSession(ctx, sqlc.CreateSessionParams{UserID: user.ID, TokenHash: h3[:], ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if _, err := create(h3[:], user.ID, testHash, 3600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := q.DeleteUser(ctx, user.ID); err != nil {
