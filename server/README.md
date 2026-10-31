@@ -21,6 +21,8 @@ Go による API サーバーの実装ディレクトリです。
 - `internal/retention`: 保持期間ジョブ（期限切れの録画を Garage と目録から消す）
 - `internal/mp4`: fMP4 のトップレベルのボックスを読み、init（`ftyp` + `moov`）の長さを求める
 - `internal/playback`: 録画の再生（HLS VOD プレイリスト、タイムライン）。範囲の録画を引く `RecordingsInRange` は切り出しでも使う
+- `internal/clip`: 録画の切り出し（Garage から一時ディレクトリに取得し、ffmpeg の concat でコピーだけで mp4 にする）
+- `internal/ffexec`: ffmpeg / ffprobe を別プロセスで動かす（最小限の環境変数、出力の上限、タイムアウト）。取り込みと切り出しで共通
 - `internal/db`: PostgreSQL の接続プールとマイグレーション
   - `migrations/`: goose の SQL マイグレーション（バイナリに埋め込み、API の起動時に適用する）
   - `queries/`: sqlc のクエリ
@@ -79,7 +81,7 @@ make dev        # air でホットリロードしながら起動する（../.env
 | `VMS_MEDIAMTX_RECORDINGS_DIR` | | `/recordings` | MediaMTX から見た録画ディレクトリ（通知の `segment_path` の先頭） |
 | `VMS_RECORDINGS_TIMEZONE` | | `UTC` | MediaMTX がファイル名を書くタイムゾーン（MediaMTX の TZ） |
 | `VMS_HOOK_TOKEN` | △ | | MediaMTX のフックの共有シークレット（32 文字以上）。未設定ならフックは 503 |
-| `VMS_FFMPEG_PATH` / `VMS_FFPROBE_PATH` | | `ffmpeg` / `ffprobe` | LGPL ビルドの ffmpeg / ffprobe（起動時に存在を確かめる） |
+| `VMS_FFMPEG_PATH` / `VMS_FFPROBE_PATH` | | `ffmpeg` / `ffprobe` | LGPL ビルドの ffmpeg / ffprobe（起動時に存在を確かめる）。取り込みと切り出しで使う。切り出しは見つからなければ無効（503） |
 | `VMS_INGEST_WORKERS` | | `2` | アップロードのワーカー数（1〜16） |
 | `VMS_INGEST_SCAN_INTERVAL` | | `5m` | 取りこぼしを拾うディレクトリ走査の間隔（10s 以上） |
 | `VMS_INGEST_DELETE_GRACE` | | `1h` | アップロードと登録の後、ローカルのファイルを消すまでの猶予（1h 以上） |
@@ -90,6 +92,11 @@ make dev        # air でホットリロードしながら起動する（../.env
 | `VMS_DISK_CHECK_INTERVAL` | | `30s` | 使用率を確かめる間隔（5s〜10m） |
 | `VMS_PLAYBACK_MAX_RANGE` | | `24h` | 再生のプレイリストとタイムラインで指定できる範囲の長さの上限（1h〜168h） |
 | `VMS_PLAYBACK_URL_TTL_MAX` | | `12h` | presigned URL の有効期限の上限（10m〜168h）。期限は「範囲の長さ + 1h」（1h 以上）で、これを超えない |
+| `VMS_CLIP_MAX_RANGE` | | `1h` | 切り出しの範囲の長さの上限（1m〜24h、`VMS_PLAYBACK_MAX_RANGE` 以下） |
+| `VMS_CLIP_MAX_BYTES` | | `4GiB` | 切り出し 1 回で取得する録画の合計の上限（64MiB〜1TiB。バイト数か `KiB` / `MiB` / `GiB` / `TiB`） |
+| `VMS_CLIP_CONCURRENCY` | | `2` | 同時に作る切り出しの数（1〜8）。超えたら 503 + `Retry-After` |
+| `VMS_CLIP_PER_USER` | | `1` | 1 人のユーザーが同時に作る切り出しの数（1〜8）。超えたら 429 + `Retry-After` |
+| `VMS_CLIP_TMP_DIR` | | `<TMPDIR>/vms-clips` | 切り出しを作る一時ディレクトリ（0700 で作る。シンボリックリンクや他のユーザーのものは拒否） |
 
 不正な値や `CHANGE_ME` のままの値があると、すべての問題を表示して起動しません。
 
@@ -183,4 +190,22 @@ ffmpeg を使うテストは `VMS_TEST_FFMPEG_DIR`（`ffmpeg` と `ffprobe` が�
 ```sh
 curl -b "__Host-vms_session=<token>" \
   "https://vms.localhost/api/cameras/<camera_id>/playlist.m3u8?from=2026-01-02T03:00:00Z&to=2026-01-02T04:00:00Z"
+```
+
+## 録画の切り出し
+
+設計は `docs/design.md` の「録画の切り出し」。`S3_*` を設定し、ffmpeg / ffprobe があると有効になる（なければ 503）。
+
+- `GET /api/cameras/{id}/clip.mp4?from=&to=`: 範囲の録画を Garage から一時ディレクトリに取得し、ffmpeg の concat demuxer でコピーだけで結合した mp4（`Content-Disposition: attachment`）
+- 範囲は `VMS_CLIP_MAX_RANGE`（既定 1h）まで、録画の合計は `VMS_CLIP_MAX_BYTES`（既定 4 GiB）まで。同時に作るのは `VMS_CLIP_CONCURRENCY`（既定 2）まで、ユーザーごとに `VMS_CLIP_PER_USER`（既定 1）まで
+- コピーだけなので、先頭は `from` の直前のキーフレームから始まる。録画のない区間は詰める
+- 映像の形式が範囲の途中で変わると 422。mp4 に入らない音声（G.711 など）は落として `X-VMS-Audio: dropped` を返す
+- 一時ディレクトリ（`VMS_CLIP_TMP_DIR`）は応答を送り終えたら消す。クラッシュの残りは起動時と 10 分ごとに消す
+- 一時ディレクトリには「録画の合計 × 2 + 512 MiB」の空きが要る（足りなければ 503）
+
+試すとき:
+
+```sh
+curl -OJ -b "__Host-vms_session=<token>" \
+  "https://vms.localhost/api/cameras/<camera_id>/clip.mp4?from=2026-01-02T03:00:00Z&to=2026-01-02T03:10:00Z"
 ```

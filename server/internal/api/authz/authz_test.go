@@ -35,6 +35,7 @@ var expected = map[string]string{
 
 	"getCameraPlaylist": "viewer",
 	"getCameraTimeline": "viewer",
+	"getCameraClip":     "viewer",
 
 	"mediamtxSegmentComplete": "hookToken",
 }

@@ -120,6 +120,8 @@ type Config struct {
 	Retention RetentionConfig
 	// Playback is recording playback. See playback.go.
 	Playback PlaybackConfig
+	// Clip is clip export. See clip.go.
+	Clip ClipConfig
 }
 
 // LogValue implements slog.LogValuer so that the whole config can be logged
@@ -145,6 +147,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Any("ingest", c.Ingest),
 		slog.Any("retention", c.Retention),
 		slog.Any("playback", c.Playback),
+		slog.Any("clip", c.Clip),
 	)
 }
 
@@ -336,6 +339,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	errs = loadStorage(get, &cfg, errs)
 	errs = loadRetention(get, &cfg, errs)
 	errs = loadPlayback(get, &cfg, errs)
+	errs = loadClip(get, &cfg, errs)
 
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))

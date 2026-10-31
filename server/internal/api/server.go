@@ -63,6 +63,8 @@ type Options struct {
 	Ingest IngestService
 	// Playback serves recorded video. Nil disables it (503).
 	Playback PlaybackService
+	// Clip exports recordings as mp4. Nil disables it (503).
+	Clip ClipService
 }
 
 // Handlers implements gen.StrictServerInterface.
@@ -72,6 +74,7 @@ type Handlers struct {
 	cameras  CameraService
 	ingest   IngestService
 	playback PlaybackService
+	clip     ClipService
 }
 
 var _ gen.StrictServerInterface = (*Handlers)(nil)
@@ -116,7 +119,7 @@ func New(logger *slog.Logger, opts Options) (*echo.Echo, error) {
 		validator,
 	)
 
-	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest, playback: opts.Playback}
+	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest, playback: opts.Playback, clip: opts.Clip}
 	strict := gen.NewStrictHandler(h, []gen.StrictMiddlewareFunc{strictAuthorize(policies)})
 	gen.RegisterHandlersWithBaseURL(e, strict, BasePath)
 
