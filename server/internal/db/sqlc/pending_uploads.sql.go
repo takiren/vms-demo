@@ -22,7 +22,7 @@ WHERE id IN (
     LIMIT $2
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at
 `
 
 type ClaimPendingUploadsParams struct {
@@ -49,6 +49,7 @@ func (q *Queries) ClaimPendingUploads(ctx context.Context, arg ClaimPendingUploa
 			&i.LastError,
 			&i.NextAttemptAt,
 			&i.CreatedAt,
+			&i.UploadedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -98,7 +99,7 @@ func (q *Queries) EnqueuePendingUpload(ctx context.Context, localPath string) (i
 }
 
 const listOldestPendingUploads = `-- name: ListOldestPendingUploads :many
-SELECT id, local_path, attempts, last_error, next_attempt_at, created_at FROM pending_uploads
+SELECT id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at FROM pending_uploads
 ORDER BY created_at
 LIMIT $1
 `
@@ -120,6 +121,7 @@ func (q *Queries) ListOldestPendingUploads(ctx context.Context, limit int32) ([]
 			&i.LastError,
 			&i.NextAttemptAt,
 			&i.CreatedAt,
+			&i.UploadedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -138,7 +140,7 @@ SET attempts = attempts + 1,
     next_attempt_at = $2
 WHERE id = $3
   AND next_attempt_at = $4
-RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at
 `
 
 type MarkPendingUploadFailedParams struct {
@@ -167,6 +169,64 @@ func (q *Queries) MarkPendingUploadFailed(ctx context.Context, arg MarkPendingUp
 		&i.LastError,
 		&i.NextAttemptAt,
 		&i.CreatedAt,
+		&i.UploadedAt,
 	)
 	return i, err
+}
+
+const markPendingUploadUploaded = `-- name: MarkPendingUploadUploaded :one
+UPDATE pending_uploads
+SET uploaded_at = now(),
+    last_error = NULL,
+    next_attempt_at = now() + make_interval(secs => $1::double precision)
+WHERE id = $2
+  AND next_attempt_at = $3
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at
+`
+
+type MarkPendingUploadUploadedParams struct {
+	DeleteAfterSeconds float64
+	ID                 uuid.UUID
+	LeaseUntil         time.Time
+}
+
+// MarkPendingUploadUploaded はアップロードと recordings への登録が済んだことを記録する（同じトランザクションで）。
+// 行は消さず、next_attempt_at を now() + delete_after_seconds にする。その時刻を過ぎて Claim されたら、
+// ワーカーはローカルのファイルを消してから DeletePendingUpload する。
+// lease_until は Claim が返した next_attempt_at。一致しなければ行を返さない（リースを失った）。
+func (q *Queries) MarkPendingUploadUploaded(ctx context.Context, arg MarkPendingUploadUploadedParams) (PendingUpload, error) {
+	row := q.db.QueryRow(ctx, markPendingUploadUploaded, arg.DeleteAfterSeconds, arg.ID, arg.LeaseUntil)
+	var i PendingUpload
+	err := row.Scan(
+		&i.ID,
+		&i.LocalPath,
+		&i.Attempts,
+		&i.LastError,
+		&i.NextAttemptAt,
+		&i.CreatedAt,
+		&i.UploadedAt,
+	)
+	return i, err
+}
+
+const releasePendingUpload = `-- name: ReleasePendingUpload :execrows
+UPDATE pending_uploads
+SET next_attempt_at = now()
+WHERE id = $1
+  AND next_attempt_at = $2
+`
+
+type ReleasePendingUploadParams struct {
+	ID         uuid.UUID
+	LeaseUntil time.Time
+}
+
+// ReleasePendingUpload はシャットダウンなどで処理を中断したとき、リースを手放してすぐに取り直せるようにする。
+// attempts は増やさない。lease_until は Claim が返した next_attempt_at。
+func (q *Queries) ReleasePendingUpload(ctx context.Context, arg ReleasePendingUploadParams) (int64, error) {
+	result, err := q.db.Exec(ctx, releasePendingUpload, arg.ID, arg.LeaseUntil)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

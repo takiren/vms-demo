@@ -171,3 +171,50 @@ func (q *Queries) ListRecordingsInRange(ctx context.Context, arg ListRecordingsI
 	}
 	return items, nil
 }
+
+const upsertRecording = `-- name: UpsertRecording :one
+INSERT INTO recordings (camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (object_key) DO UPDATE
+SET ended_at = EXCLUDED.ended_at,
+    size_bytes = EXCLUDED.size_bytes,
+    thumbnail_key = COALESCE(EXCLUDED.thumbnail_key, recordings.thumbnail_key)
+WHERE recordings.camera_id = EXCLUDED.camera_id
+  AND recordings.started_at = EXCLUDED.started_at
+RETURNING id, camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, created_at
+`
+
+type UpsertRecordingParams struct {
+	CameraID     uuid.UUID
+	StartedAt    time.Time
+	EndedAt      time.Time
+	ObjectKey    string
+	SizeBytes    int64
+	ThumbnailKey *string
+}
+
+// UpsertRecording は取り込みのリトライで同じセグメントを登録し直しても 1 行にする（object_key で一意）。
+// 既存の行と camera_id / started_at が違う（別のセグメントがキーで衝突した）ときは更新せず、行を返さない
+// （pgx.ErrNoRows）。サムネイルの生成に失敗したリトライでは、前回のサムネイルを残す。
+func (q *Queries) UpsertRecording(ctx context.Context, arg UpsertRecordingParams) (Recording, error) {
+	row := q.db.QueryRow(ctx, upsertRecording,
+		arg.CameraID,
+		arg.StartedAt,
+		arg.EndedAt,
+		arg.ObjectKey,
+		arg.SizeBytes,
+		arg.ThumbnailKey,
+	)
+	var i Recording
+	err := row.Scan(
+		&i.ID,
+		&i.CameraID,
+		&i.StartedAt,
+		&i.EndedAt,
+		&i.ObjectKey,
+		&i.SizeBytes,
+		&i.ThumbnailKey,
+		&i.CreatedAt,
+	)
+	return i, err
+}

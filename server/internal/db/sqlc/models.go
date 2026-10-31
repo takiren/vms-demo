@@ -38,6 +38,7 @@ type PendingUpload struct {
 	LastError     *string
 	NextAttemptAt time.Time
 	CreatedAt     time.Time
+	UploadedAt    *time.Time
 }
 
 type Recording struct {
