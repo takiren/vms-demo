@@ -100,6 +100,109 @@ func (e Role) Valid() bool {
 	}
 }
 
+// Camera defines model for Camera.
+type Camera struct {
+	CreatedAt time.Time `json:"created_at"`
+
+	// Enabled false なら MediaMTX から path を外す（接続も録画もしない）
+	Enabled bool `json:"enabled"`
+
+	// HasCredentials 認証情報が設定されているか（認証情報そのものは返さない）
+	HasCredentials bool               `json:"has_credentials"`
+	Id             openapi_types.UUID `json:"id"`
+
+	// MainUrl `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+	// 空白や ASCII 以外の文字はパーセントエンコードする。
+	MainUrl RtspUrl `json:"main_url"`
+
+	// Name 1〜100 文字。前後の空白と制御文字は不可。一意
+	Name CameraName `json:"name"`
+
+	// RetentionDays 録画の保持日数
+	RetentionDays RetentionDays `json:"retention_days"`
+
+	// SubUrl `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+	// 空白や ASCII 以外の文字はパーセントエンコードする。
+	SubUrl    *RtspUrl  `json:"sub_url,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// CameraCreate defines model for CameraCreate.
+type CameraCreate struct {
+	// Credentials RTSP の認証情報。書き込み専用（暗号化して保存し、API は返さない）
+	Credentials *CameraCredentials `json:"credentials,omitempty"`
+
+	// Enabled 省略時 true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// MainUrl `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+	// 空白や ASCII 以外の文字はパーセントエンコードする。
+	MainUrl RtspUrl `json:"main_url"`
+
+	// Name 1〜100 文字。前後の空白と制御文字は不可。一意
+	Name CameraName `json:"name"`
+
+	// RetentionDays 録画の保持日数
+	RetentionDays *RetentionDays `json:"retention_days,omitempty"`
+
+	// SubUrl `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+	// 空白や ASCII 以外の文字はパーセントエンコードする。
+	SubUrl *RtspUrl `json:"sub_url,omitempty"`
+}
+
+// CameraCredentials RTSP の認証情報。書き込み専用（暗号化して保存し、API は返さない）
+type CameraCredentials struct {
+	Password string `json:"password"`
+	Username string `json:"username"`
+}
+
+// CameraName 1〜100 文字。前後の空白と制御文字は不可。一意
+type CameraName = string
+
+// CameraSummary defines model for CameraSummary.
+type CameraSummary struct {
+	Enabled bool `json:"enabled"`
+
+	// HasSub 多分割ライブ用の sub ストリームがあるか
+	HasSub bool               `json:"has_sub"`
+	Id     openapi_types.UUID `json:"id"`
+
+	// Name 1〜100 文字。前後の空白と制御文字は不可。一意
+	Name CameraName `json:"name"`
+}
+
+// CameraSummaryList defines model for CameraSummaryList.
+type CameraSummaryList struct {
+	Cameras []CameraSummary `json:"cameras"`
+}
+
+// CameraUpdate defines model for CameraUpdate.
+type CameraUpdate struct {
+	// Credentials RTSP の認証情報。書き込み専用（暗号化して保存し、API は返さない）
+	Credentials *CameraCredentials `json:"credentials,omitempty"`
+	Enabled     *bool              `json:"enabled,omitempty"`
+
+	// MainUrl `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+	// 空白や ASCII 以外の文字はパーセントエンコードする。
+	MainUrl *RtspUrl `json:"main_url,omitempty"`
+
+	// Name 1〜100 文字。前後の空白と制御文字は不可。一意
+	Name *CameraName `json:"name,omitempty"`
+
+	// RemoveCredentials true なら認証情報を消す（`credentials` と同時には指定できない）
+	RemoveCredentials *bool `json:"remove_credentials,omitempty"`
+
+	// RemoveSubUrl true なら sub の URL を消す（`sub_url` と同時には指定できない）
+	RemoveSubUrl *bool `json:"remove_sub_url,omitempty"`
+
+	// RetentionDays 録画の保持日数
+	RetentionDays *RetentionDays `json:"retention_days,omitempty"`
+
+	// SubUrl `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+	// 空白や ASCII 以外の文字はパーセントエンコードする。
+	SubUrl *RtspUrl `json:"sub_url,omitempty"`
+}
+
 // ChangePasswordRequest defines model for ChangePasswordRequest.
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
@@ -144,8 +247,15 @@ type LoginRequest struct {
 // NewPassword Unicode のコードポイントで 12 文字以上 128 文字以下。文字種の条件はない。
 type NewPassword = string
 
+// RetentionDays 録画の保持日数
+type RetentionDays = int
+
 // Role admin は全操作、viewer は閲覧だけ
 type Role string
+
+// RtspUrl `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+// 空白や ASCII 以外の文字はパーセントエンコードする。
+type RtspUrl = string
 
 // User defines model for User.
 type User struct {
@@ -189,6 +299,9 @@ type UserUpdate struct {
 // Username ASCII の英数字と `.` `_` `-`。大文字小文字を区別せずに一意
 type Username = string
 
+// CameraID defines model for CameraID.
+type CameraID = openapi_types.UUID
+
 // UserID defines model for UserID.
 type UserID = openapi_types.UUID
 
@@ -197,6 +310,12 @@ type LoginJSONRequestBody = LoginRequest
 
 // ChangeOwnPasswordJSONRequestBody defines body for ChangeOwnPassword for application/json ContentType.
 type ChangeOwnPasswordJSONRequestBody = ChangePasswordRequest
+
+// CreateCameraJSONRequestBody defines body for CreateCamera for application/json ContentType.
+type CreateCameraJSONRequestBody = CameraCreate
+
+// UpdateCameraJSONRequestBody defines body for UpdateCamera for application/json ContentType.
+type UpdateCameraJSONRequestBody = CameraUpdate
 
 // CreateUserJSONRequestBody defines body for CreateUser for application/json ContentType.
 type CreateUserJSONRequestBody = UserCreate
@@ -218,6 +337,21 @@ type ServerInterface interface {
 	// ChangeOwnPassword 自分のパスワードを変える
 	// (POST /auth/password)
 	ChangeOwnPassword(ctx *echo.Context) error
+	// ListCameras カメラの一覧
+	// (GET /cameras)
+	ListCameras(ctx *echo.Context) error
+	// CreateCamera カメラを登録する
+	// (POST /cameras)
+	CreateCamera(ctx *echo.Context) error
+	// DeleteCamera カメラを削除する
+	// (DELETE /cameras/{id})
+	DeleteCamera(ctx *echo.Context, id CameraID) error
+	// GetCamera カメラの設定を取得する
+	// (GET /cameras/{id})
+	GetCamera(ctx *echo.Context, id CameraID) error
+	// UpdateCamera カメラの設定を変える
+	// (PATCH /cameras/{id})
+	UpdateCamera(ctx *echo.Context, id CameraID) error
 	// GetHealthz API プロセスの死活確認
 	// (GET /healthz)
 	GetHealthz(ctx *echo.Context) error
@@ -276,6 +410,72 @@ func (w *ServerInterfaceWrapper) ChangeOwnPassword(ctx *echo.Context) error {
 
 	// Invoke the callback with all the unmarshaled arguments
 	err = w.Handler.ChangeOwnPassword(ctx)
+	return err
+}
+
+// ListCameras converts echo context to params.
+func (w *ServerInterfaceWrapper) ListCameras(ctx *echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.ListCameras(ctx)
+	return err
+}
+
+// CreateCamera converts echo context to params.
+func (w *ServerInterfaceWrapper) CreateCamera(ctx *echo.Context) error {
+	var err error
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.CreateCamera(ctx)
+	return err
+}
+
+// DeleteCamera converts echo context to params.
+func (w *ServerInterfaceWrapper) DeleteCamera(ctx *echo.Context) error {
+	var err error
+	// ------------- Path parameter "id" -------------
+	var id CameraID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", ctx.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: ctx.Request().URL.RawPath == ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.DeleteCamera(ctx, id)
+	return err
+}
+
+// GetCamera converts echo context to params.
+func (w *ServerInterfaceWrapper) GetCamera(ctx *echo.Context) error {
+	var err error
+	// ------------- Path parameter "id" -------------
+	var id CameraID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", ctx.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: ctx.Request().URL.RawPath == ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.GetCamera(ctx, id)
+	return err
+}
+
+// UpdateCamera converts echo context to params.
+func (w *ServerInterfaceWrapper) UpdateCamera(ctx *echo.Context) error {
+	var err error
+	// ------------- Path parameter "id" -------------
+	var id CameraID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", ctx.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: ctx.Request().URL.RawPath == ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.UpdateCamera(ctx, id)
 	return err
 }
 
@@ -411,6 +611,11 @@ func RegisterHandlersWithOptions(router EchoRouter, si ServerInterface, options 
 	router.DELETE(options.BaseURL+"/users/:id", wrapper.DeleteUser, options.OperationMiddlewares["deleteUser"]...)
 	router.GET(options.BaseURL+"/users/:id", wrapper.GetUser, options.OperationMiddlewares["getUser"]...)
 	router.PATCH(options.BaseURL+"/users/:id", wrapper.UpdateUser, options.OperationMiddlewares["updateUser"]...)
+	router.GET(options.BaseURL+"/cameras", wrapper.ListCameras, options.OperationMiddlewares["listCameras"]...)
+	router.POST(options.BaseURL+"/cameras", wrapper.CreateCamera, options.OperationMiddlewares["createCamera"]...)
+	router.DELETE(options.BaseURL+"/cameras/:id", wrapper.DeleteCamera, options.OperationMiddlewares["deleteCamera"]...)
+	router.GET(options.BaseURL+"/cameras/:id", wrapper.GetCamera, options.OperationMiddlewares["getCamera"]...)
+	router.PATCH(options.BaseURL+"/cameras/:id", wrapper.UpdateCamera, options.OperationMiddlewares["updateCamera"]...)
 
 }
 
@@ -611,6 +816,195 @@ type ChangeOwnPassworddefaultJSONResponse struct {
 }
 
 func (response ChangeOwnPassworddefaultJSONResponse) VisitChangeOwnPasswordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListCamerasRequestObject struct {
+}
+
+type ListCamerasResponseObject interface {
+	VisitListCamerasResponse(w http.ResponseWriter) error
+}
+
+type ListCameras200JSONResponse CameraSummaryList
+
+func (response ListCameras200JSONResponse) VisitListCamerasResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListCamerasdefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response ListCamerasdefaultJSONResponse) VisitListCamerasResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateCameraRequestObject struct {
+	Body *CreateCameraJSONRequestBody
+}
+
+type CreateCameraResponseObject interface {
+	VisitCreateCameraResponse(w http.ResponseWriter) error
+}
+
+type CreateCamera201JSONResponse Camera
+
+func (response CreateCamera201JSONResponse) VisitCreateCameraResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateCameradefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response CreateCameradefaultJSONResponse) VisitCreateCameraResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteCameraRequestObject struct {
+	Id CameraID `json:"id"`
+}
+
+type DeleteCameraResponseObject interface {
+	VisitDeleteCameraResponse(w http.ResponseWriter) error
+}
+
+type DeleteCamera204Response struct {
+}
+
+func (response DeleteCamera204Response) VisitDeleteCameraResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteCameradefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response DeleteCameradefaultJSONResponse) VisitDeleteCameraResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetCameraRequestObject struct {
+	Id CameraID `json:"id"`
+}
+
+type GetCameraResponseObject interface {
+	VisitGetCameraResponse(w http.ResponseWriter) error
+}
+
+type GetCamera200JSONResponse Camera
+
+func (response GetCamera200JSONResponse) VisitGetCameraResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetCameradefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response GetCameradefaultJSONResponse) VisitGetCameraResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateCameraRequestObject struct {
+	Id   CameraID `json:"id"`
+	Body *UpdateCameraJSONRequestBody
+}
+
+type UpdateCameraResponseObject interface {
+	VisitUpdateCameraResponse(w http.ResponseWriter) error
+}
+
+type UpdateCamera200JSONResponse Camera
+
+func (response UpdateCamera200JSONResponse) VisitUpdateCameraResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateCameradefaultJSONResponse struct {
+	Body       Error
+	StatusCode int
+}
+
+func (response UpdateCameradefaultJSONResponse) VisitUpdateCameraResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
@@ -863,6 +1257,21 @@ type StrictServerInterface interface {
 	// ChangeOwnPassword 自分のパスワードを変える
 	// (POST /auth/password)
 	ChangeOwnPassword(ctx context.Context, request ChangeOwnPasswordRequestObject) (ChangeOwnPasswordResponseObject, error)
+	// ListCameras カメラの一覧
+	// (GET /cameras)
+	ListCameras(ctx context.Context, request ListCamerasRequestObject) (ListCamerasResponseObject, error)
+	// CreateCamera カメラを登録する
+	// (POST /cameras)
+	CreateCamera(ctx context.Context, request CreateCameraRequestObject) (CreateCameraResponseObject, error)
+	// DeleteCamera カメラを削除する
+	// (DELETE /cameras/{id})
+	DeleteCamera(ctx context.Context, request DeleteCameraRequestObject) (DeleteCameraResponseObject, error)
+	// GetCamera カメラの設定を取得する
+	// (GET /cameras/{id})
+	GetCamera(ctx context.Context, request GetCameraRequestObject) (GetCameraResponseObject, error)
+	// UpdateCamera カメラの設定を変える
+	// (PATCH /cameras/{id})
+	UpdateCamera(ctx context.Context, request UpdateCameraRequestObject) (UpdateCameraResponseObject, error)
 	// GetHealthz API プロセスの死活確認
 	// (GET /healthz)
 	GetHealthz(ctx context.Context, request GetHealthzRequestObject) (GetHealthzResponseObject, error)
@@ -1027,6 +1436,173 @@ func (sh *strictHandler) ChangeOwnPassword(ctx *echo.Context) error {
 		return err
 	} else if validResponse, ok := response.(ChangeOwnPasswordResponseObject); ok {
 		return validResponse.VisitChangeOwnPasswordResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// ListCameras operation middleware
+func (sh *strictHandler) ListCameras(ctx *echo.Context) error {
+	var request ListCamerasRequestObject
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.ListCameras(ctx.Request().Context(), request.(ListCamerasRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListCameras")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(ListCamerasResponseObject); ok {
+		return validResponse.VisitListCamerasResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// CreateCamera operation middleware
+func (sh *strictHandler) CreateCamera(ctx *echo.Context) error {
+	var request CreateCameraRequestObject
+
+	var body CreateCameraJSONRequestBody
+	var err error
+	if _, ok := ctx.Echo().Binder.(*echo.DefaultBinder); ok {
+		// A request validator built on kin-openapi's openapi3filter with
+		// KeepValidatedValue leaves the value it validated on the body. Bind
+		// that value, matching member names exactly, so the handler receives
+		// what was validated instead of a second, case-insensitive decode.
+		// Otherwise bind only the request body, so that path and query
+		// parameters are not also bound into the body struct.
+		if vb, ok := ctx.Request().Body.(interface{ ValidatedValue() any }); !ok || runtime.BindJSONValue(vb.ValidatedValue(), &body) != nil {
+			err = echo.BindBody(ctx, &body)
+		}
+	} else {
+		// A custom binder is installed on the Echo instance; defer to it
+		// entirely, since echo.Binder does not expose body-only binding and
+		// the binder may do more than decode (for example call ctx.Validate).
+		err = ctx.Bind(&body)
+	}
+	if err != nil {
+		return err
+	}
+	request.Body = &body
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateCamera(ctx.Request().Context(), request.(CreateCameraRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateCamera")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(CreateCameraResponseObject); ok {
+		return validResponse.VisitCreateCameraResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// DeleteCamera operation middleware
+func (sh *strictHandler) DeleteCamera(ctx *echo.Context, id CameraID) error {
+	var request DeleteCameraRequestObject
+
+	request.Id = id
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteCamera(ctx.Request().Context(), request.(DeleteCameraRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteCamera")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(DeleteCameraResponseObject); ok {
+		return validResponse.VisitDeleteCameraResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// GetCamera operation middleware
+func (sh *strictHandler) GetCamera(ctx *echo.Context, id CameraID) error {
+	var request GetCameraRequestObject
+
+	request.Id = id
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.GetCamera(ctx.Request().Context(), request.(GetCameraRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetCamera")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(GetCameraResponseObject); ok {
+		return validResponse.VisitGetCameraResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// UpdateCamera operation middleware
+func (sh *strictHandler) UpdateCamera(ctx *echo.Context, id CameraID) error {
+	var request UpdateCameraRequestObject
+
+	request.Id = id
+
+	var body UpdateCameraJSONRequestBody
+	var err error
+	if _, ok := ctx.Echo().Binder.(*echo.DefaultBinder); ok {
+		// A request validator built on kin-openapi's openapi3filter with
+		// KeepValidatedValue leaves the value it validated on the body. Bind
+		// that value, matching member names exactly, so the handler receives
+		// what was validated instead of a second, case-insensitive decode.
+		// Otherwise bind only the request body, so that path and query
+		// parameters are not also bound into the body struct.
+		if vb, ok := ctx.Request().Body.(interface{ ValidatedValue() any }); !ok || runtime.BindJSONValue(vb.ValidatedValue(), &body) != nil {
+			err = echo.BindBody(ctx, &body)
+		}
+	} else {
+		// A custom binder is installed on the Echo instance; defer to it
+		// entirely, since echo.Binder does not expose body-only binding and
+		// the binder may do more than decode (for example call ctx.Validate).
+		err = ctx.Bind(&body)
+	}
+	if err != nil {
+		return err
+	}
+	request.Body = &body
+
+	handler := func(ctx *echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateCamera(ctx.Request().Context(), request.(UpdateCameraRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateCamera")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(UpdateCameraResponseObject); ok {
+		return validResponse.VisitUpdateCameraResponse(ctx.Response())
 	} else if response != nil {
 		return fmt.Errorf("unexpected response type: %T", response)
 	}
@@ -1228,52 +1804,71 @@ func (sh *strictHandler) UpdateUser(ctx *echo.Context, id UserID) error {
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
-	"dSLeD+VH87Rrp/x4/l8DAA==",
+	"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",
+	"shADEiNWzbOMTq/YFxR3OP/ydlQ+Mzbz/wMA",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

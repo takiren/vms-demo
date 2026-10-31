@@ -36,6 +36,12 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
   - `cam_<uuid>_main`: 録画用。単画面のライブにも使う
   - `cam_<uuid>_sub`: 多分割ライブ用（H.264）
 - カメラの定義は DB が正。API が起動時と変更時に Control API で反映する
+  - 差分同期: Control API の path の一覧と比べ、違う `cam_` の path だけを add / replace / delete する。`cam_` で始まらない path には触らない
+  - 起動時、カメラの変更時に加えて、定期的（既定 30 秒）にも同期する（MediaMTX を再起動すると Control API で足した path が消えるため）。MediaMTX に届かなくても API の起動は止めず、バックグラウンドでやり直す。同期は同時に 1 つだけ
+  - 無効（`enabled: false`）のカメラは path を外す。認証情報を復号できないカメラは、path を変えずにエラーを記録する（録画を止めない側に倒す）
+  - `_main`: `record: true`、常時接続。`_sub`: `record: false`、`sourceOnDemand: true`（見ている人がいるときだけカメラにつなぐ）。sub の URL がなければ作らない
+  - source は DB の URL に、復号した認証情報を userinfo として入れたもの。source を含む設定や MediaMTX の応答はログに出さない
+  - API は Control API に Basic 認証（`VMS_MEDIAMTX_API_USER` / `VMS_MEDIAMTX_API_PASSWORD`）で名乗る。MediaMTX はこれを `authMethod: http` で API に問い合わせ、API はこの組にだけ `action: api` を許可する
 - `mediamtx.yml` には全体設定だけを書く。path の定義は書かない
 - 録画: `recordFormat: fmp4`、`recordSegmentDuration: 1m`。main だけを録る
 - 認証: `authMethod: http` で Go API に問い合わせる
@@ -98,6 +104,9 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 | `events` | ディスク逼迫、アップロード失敗、カメラの切断など |
 
 - RTSP の認証情報は AES-256-GCM で暗号化する。鍵は環境変数 `VMS_SECRET_KEY` で渡す
+  - 形式: `バージョン（1 バイト、今は 1）|| nonce（12 バイト、毎回 crypto/rand）|| 暗号文 || タグ`。中身は `{"username","password"}` の JSON
+  - AAD にバージョンとカメラの ID を入れる。暗号文を別の行にコピーしても復号できない。そのため ID（UUIDv7）は API が決めてから挿入する
+  - バージョンの 1 バイトは、鍵のローテーション（Phase 2）で新旧を区別するためのもの
 - `username` は ASCII（`[A-Za-z0-9._-]`、64 文字まで）に限り、大文字小文字を区別せずに一意にする（`lower(username)` の一意インデックス）
 - `sessions` にはセッショントークンの SHA-256 だけを保存する。生のトークンは保存しない
 - `cameras.main_url` / `sub_url` に認証情報（userinfo、`user:pass@`）を入れない。CHECK で拒否する
@@ -189,6 +198,13 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 - エラーはすべて `{"error": {"code": "...", "message": "..."}}` で返す（`api/openapi.yaml` の `Error`）
   - 5xx では内部の詳細を返さず、ログにだけ出す
 - 設定は環境変数から読む。起動時にまとめて検証し、不正なら起動しない。秘密情報はログに出さない
+
+### カメラ管理
+
+- 一覧（`GET /api/cameras`）は viewer も使える。返すのは ID、名前、有効か、sub があるかだけ（URL はカメラの内部アドレスなので返さない）。設定の取得、登録、変更、削除は admin だけ
+- URL は `rtsp://` / `rtsps://` だけ。userinfo を含む URL は 400（DB の CHECK でも拒否する）
+- 認証情報は書き込み専用。応答には `has_credentials` だけを入れ、ログにも出さない。変更では、置き換えるか（`credentials`）、消すか（`remove_credentials: true`）を明示する。どちらもなければそのまま
+- 録画が残っているカメラは削除できない（409）。録画を止めるだけなら無効にする
 
 ## フロントエンド
 

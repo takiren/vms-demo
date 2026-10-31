@@ -23,12 +23,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v5"
 
 	"github.com/takiren/vms-demo/server/internal/api"
 	"github.com/takiren/vms-demo/server/internal/auth"
+	"github.com/takiren/vms-demo/server/internal/camera"
 	"github.com/takiren/vms-demo/server/internal/config"
 	"github.com/takiren/vms-demo/server/internal/db"
+	"github.com/takiren/vms-demo/server/internal/mediamtx"
 )
 
 func main() {
@@ -64,7 +67,7 @@ func run(args []string) error {
 
 // setup loads the configuration, connects to the database, applies the
 // migrations and builds the auth service. The caller closes the pool.
-func setup(ctx context.Context, logger *slog.Logger, cfg config.Config) (*auth.Service, func(), error) {
+func setup(ctx context.Context, logger *slog.Logger, cfg config.Config) (*auth.Service, *pgxpool.Pool, error) {
 	pool, err := db.Open(ctx, cfg.DatabaseURL.Value())
 	if err != nil {
 		return nil, nil, err
@@ -81,7 +84,22 @@ func setup(ctx context.Context, logger *slog.Logger, cfg config.Config) (*auth.S
 		pool.Close()
 		return nil, nil, err
 	}
-	return svc, pool.Close, nil
+	return svc, pool, nil
+}
+
+// startCameras builds the camera service and starts syncing the cameras to
+// MediaMTX in the background. Startup does not wait for MediaMTX: if it is
+// down, the reconciler keeps retrying.
+func startCameras(ctx context.Context, logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) (*camera.Service, error) {
+	cams, err := camera.NewService(pool, cfg.SecretKey.Bytes(), logger)
+	if err != nil {
+		return nil, err
+	}
+	client := mediamtx.NewClient(cfg.MediaMTXAPIURL, cfg.MediaMTXAPIUser, cfg.MediaMTXAPIPassword.Value())
+	rec := mediamtx.NewReconciler(client, cams, logger, cfg.MediaMTXSyncInterval)
+	cams.SetOnChange(rec.Trigger)
+	go rec.Run(ctx)
+	return cams, nil
 }
 
 func serve() error {
@@ -98,19 +116,25 @@ func serve() error {
 	defer stop()
 
 	// Fail fast: without the database (and an up-to-date schema) nothing works.
-	svc, closeDB, err := setup(ctx, logger, cfg)
+	svc, pool, err := setup(ctx, logger, cfg)
 	if err != nil {
 		return err
 	}
-	defer closeDB()
+	defer pool.Close()
 
 	bootstrapAdmin(ctx, logger, svc, cfg)
 	go svc.RunCleanup(ctx)
+
+	cams, err := startCameras(ctx, logger, cfg, pool)
+	if err != nil {
+		return err
+	}
 
 	e, err := api.New(logger, api.Options{
 		Auth:           svc,
 		PublicOrigin:   cfg.PublicOrigin,
 		TrustedProxies: cfg.TrustedProxies,
+		Cameras:        cams,
 	})
 	if err != nil {
 		return err
@@ -179,11 +203,11 @@ func userCommand(cmd, username string, stdin *os.File, stderr io.Writer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	svc, closeDB, err := setup(ctx, logger, cfg)
+	svc, pool, err := setup(ctx, logger, cfg)
 	if err != nil {
 		return err
 	}
-	defer closeDB()
+	defer pool.Close()
 
 	switch cmd {
 	case "create-admin":

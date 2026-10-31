@@ -17,13 +17,16 @@ const (
 	testDBURL    = "postgres://vms:" + testPassword + "@db.example:5432/vms?sslmode=disable"
 )
 
+const testMediaMTXPassword = "mediamtx-api-secret-0123456789"
+
 var testKey = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
 
 func env(overrides map[string]string) func(string) (string, bool) {
 	m := map[string]string{
-		config.EnvDatabaseURL: testDBURL,
-		config.EnvSecretKey:   testKey,
-		config.EnvHost:        "vms.example",
+		config.EnvDatabaseURL:         testDBURL,
+		config.EnvSecretKey:           testKey,
+		config.EnvHost:                "vms.example",
+		config.EnvMediaMTXAPIPassword: testMediaMTXPassword,
 	}
 	for k, v := range overrides {
 		if v == "<unset>" {
@@ -269,5 +272,58 @@ func TestDatabaseURLRedactsQueryParams(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLoadMediaMTX(t *testing.T) {
+	cfg, err := config.Load(env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MediaMTXAPIURL != config.DefaultMediaMTXAPIURL || cfg.MediaMTXAPIUser != config.DefaultMediaMTXAPIUser ||
+		cfg.MediaMTXAPIPassword.Value() != testMediaMTXPassword || cfg.MediaMTXSyncInterval != config.DefaultMediaMTXSyncInterval {
+		t.Errorf("defaults: %+v", cfg)
+	}
+
+	cfg, err = config.Load(env(map[string]string{
+		config.EnvMediaMTXAPIURL:       "http://mediamtx:9997/",
+		config.EnvMediaMTXAPIUser:      "api.user",
+		config.EnvMediaMTXSyncInterval: "1m",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MediaMTXAPIURL != "http://mediamtx:9997" || cfg.MediaMTXAPIUser != "api.user" || cfg.MediaMTXSyncInterval != time.Minute {
+		t.Errorf("overrides: %+v", cfg)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("cfg", slog.Any("config", cfg))
+	if strings.Contains(buf.String(), testMediaMTXPassword) {
+		t.Errorf("log leaks the MediaMTX password: %s", buf.String())
+	}
+
+	tests := []struct {
+		env     map[string]string
+		wantMsg string
+	}{
+		{map[string]string{config.EnvMediaMTXAPIPassword: "<unset>"}, "VMS_MEDIAMTX_API_PASSWORD: is required"},
+		{map[string]string{config.EnvMediaMTXAPIPassword: "CHANGE_ME"}, "VMS_MEDIAMTX_API_PASSWORD: is still the CHANGE_ME"},
+		{map[string]string{config.EnvMediaMTXAPIPassword: "short"}, "VMS_MEDIAMTX_API_PASSWORD: must be 16-256"},
+		{map[string]string{config.EnvMediaMTXAPIPassword: "0123456789abcdef\n"}, "must not contain control characters"},
+		{map[string]string{config.EnvMediaMTXAPIURL: "ftp://mediamtx:9997"}, "VMS_MEDIAMTX_API_URL: must be"},
+		{map[string]string{config.EnvMediaMTXAPIURL: "http://u:p@mediamtx:9997"}, "VMS_MEDIAMTX_API_URL: must be"},
+		{map[string]string{config.EnvMediaMTXAPIURL: "http://mediamtx:9997/v3"}, "VMS_MEDIAMTX_API_URL: must be"},
+		{map[string]string{config.EnvMediaMTXAPIUser: "a b"}, "VMS_MEDIAMTX_API_USER: must be"},
+		{map[string]string{config.EnvMediaMTXSyncInterval: "1s"}, "VMS_MEDIAMTX_SYNC_INTERVAL: must be between"},
+	}
+	for _, tt := range tests {
+		_, err := config.Load(env(tt.env))
+		if err == nil || !strings.Contains(err.Error(), tt.wantMsg) {
+			t.Errorf("%v: error = %v, want %q", tt.env, err, tt.wantMsg)
+		}
+		if err != nil && strings.Contains(err.Error(), testMediaMTXPassword) {
+			t.Errorf("error leaks the password: %v", err)
+		}
 	}
 }

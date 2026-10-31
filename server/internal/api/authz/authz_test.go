@@ -27,6 +27,11 @@ var expected = map[string]string{
 	"getUser":           "admin",
 	"updateUser":        "admin",
 	"deleteUser":        "admin",
+	"listCameras":       "viewer",
+	"createCamera":      "admin",
+	"getCamera":         "admin",
+	"updateCamera":      "admin",
+	"deleteCamera":      "admin",
 }
 
 func TestEverySpecOperationHasADecidedPolicy(t *testing.T) {

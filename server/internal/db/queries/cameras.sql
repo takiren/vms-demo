@@ -32,3 +32,14 @@ RETURNING *;
 -- DeleteCamera は録画が残っていると外部キー（ON DELETE RESTRICT、SQLSTATE 23001）で失敗する。
 DELETE FROM cameras
 WHERE id = $1;
+
+-- name: CreateCameraWithID :one
+-- 認証情報の暗号文を ID に結び付ける（AAD）ため、ID を先に Go で決めて（UUIDv7）挿入する。
+INSERT INTO cameras (id, name, main_url, sub_url, credentials_enc, retention_days, enabled)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING *;
+
+-- name: GetCameraForUpdate :one
+SELECT * FROM cameras
+WHERE id = $1
+FOR UPDATE;
