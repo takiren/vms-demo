@@ -210,6 +210,31 @@ export interface paths {
         patch: operations["updateCamera"];
         trace?: never;
     };
+    "/internal/mediamtx/segment-complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 録画セグメントの完了通知（MediaMTX の runOnRecordSegmentComplete）
+         * @description MediaMTX がセグメントを書き終えたときに呼ぶ（docker/mediamtx/mtx-segment-complete.sh）。
+         *     `segment_path` を API の録画ディレクトリに対応づけて検証し、`pending_uploads` に積む（同じファイルは 1 回だけ）。
+         *     - `X-VMS-Hook-Token` が `VMS_HOOK_TOKEN` と一致しなければ 401。録画の取り込みが無効（トークンが未設定）なら 503
+         *     - `segment_path` が録画ディレクトリの下の `cam_<uuid>_main/<YYYY-MM-DD_HH-MM-SS-ffffff>.mp4` でない、
+         *       シンボリックリンクを通る、`path` と合わない場合は 400。ファイルがなければ 404。カメラが登録されていなければ 404
+         *     - 通知を取りこぼしても、API のディレクトリ走査が拾う
+         */
+        post: operations["mediamtxSegmentComplete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -314,6 +339,15 @@ export interface components {
             remove_credentials?: boolean;
             retention_days?: components["schemas"]["RetentionDays"];
             enabled?: boolean;
+        };
+        /** @description MediaMTX の MTX_PATH、MTX_SEGMENT_PATH、MTX_SEGMENT_DURATION */
+        SegmentComplete: {
+            /** @description MediaMTX の path 名（`cam_<uuid>_main`） */
+            path: string;
+            /** @description MediaMTX から見たセグメントの絶対パス（`/recordings/cam_<uuid>_main/...mp4`） */
+            segment_path: string;
+            /** @description Go の duration 形式（`1m0.002s`）。記録用で、長さは ffprobe で測る */
+            segment_duration?: string;
         };
         Health: {
             /** @enum {string} */
@@ -726,6 +760,29 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Camera"];
                 };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    mediamtxSegmentComplete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SegmentComplete"];
+            };
+        };
+        responses: {
+            /** @description 受け付けた（すでに積まれていた場合も） */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             default: components["responses"]["Error"];
         };
