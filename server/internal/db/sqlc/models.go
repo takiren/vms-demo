@@ -53,6 +53,7 @@ type Recording struct {
 	SizeBytes    int64
 	ThumbnailKey *string
 	CreatedAt    time.Time
+	InitSize     *int64
 }
 
 type Session struct {

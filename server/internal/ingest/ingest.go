@@ -42,6 +42,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/takiren/vms-demo/server/internal/db/sqlc"
+	"github.com/takiren/vms-demo/server/internal/mp4"
 )
 
 // Store is what the pipeline needs from object storage (s3store.Store).
@@ -339,6 +340,8 @@ func (s *Service) process(ctx context.Context, row sqlc.PendingUpload) {
 		return
 	}
 
+	initSize := s.initSize(log, seg.LocalPath, fi.Size())
+
 	thumb, err := s.o.Media.Thumbnail(ctx, seg.LocalPath)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -378,6 +381,7 @@ func (s *Service) process(ctx context.Context, row sqlc.PendingUpload) {
 		ObjectKey:    videoKey,
 		SizeBytes:    fi.Size(),
 		ThumbnailKey: thumbKey,
+		InitSize:     initSize,
 	}, fi.ModTime(), s.o.DeleteGrace)
 	switch {
 	case err != nil:
@@ -389,6 +393,23 @@ func (s *Service) process(ctx context.Context, row sqlc.PendingUpload) {
 			slog.Int64("size_bytes", fi.Size()), slog.Duration("duration", dur),
 			slog.Bool("thumbnail", thumbKey != nil))
 	}
+}
+
+// initSize returns the length of the segment's fMP4 init section (for HLS
+// byte ranges, #13), or nil if it cannot be found. A segment without one is
+// still uploaded: playback computes it again (and skips the segment if it
+// fails), and the recording is kept either way.
+func (s *Service) initSize(log *slog.Logger, file string, size int64) *int64 {
+	f, err := os.Open(file) //nolint:gosec // G304: file was validated by Layout.Resolve (inside the recordings dir, no symlinks)
+	if err == nil {
+		defer func() { _ = f.Close() }()
+		var n int64
+		if n, err = mp4.InitSize(f, size); err == nil {
+			return &n
+		}
+	}
+	log.Warn("cannot find the fMP4 init section; the segment will be uploaded without it", slog.String("error", err.Error()))
+	return nil
 }
 
 // duration measures the segment with ffprobe, falling back to the file's

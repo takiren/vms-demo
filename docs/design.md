@@ -126,6 +126,22 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
   - 再生は hls.js
 - 切り出し: 指定した範囲のセグメントを ffmpeg で結合し（コピーのみ）、mp4 として返す
 
+### 録画再生の詳細
+
+- `GET /api/cameras/{id}/playlist.m3u8?from=&to=`（viewer）: HLS の VOD プレイリスト
+  - `from` / `to` は RFC 3339。`from < to`、長さは `VMS_PLAYBACK_MAX_RANGE`（既定 24h）まで。範囲と重なる録画をセグメント単位（切らずに丸ごと）で含める。1 回に返す録画は 5000 件まで（超えたら 400）
+  - `EXT-X-VERSION:7`、`EXT-X-PLAYLIST-TYPE:VOD`、`EXT-X-INDEPENDENT-SEGMENTS`（MediaMTX はキーフレームでセグメントを切る）、`EXT-X-TARGETDURATION`（最長のセグメントの切り上げ）、`EXT-X-ENDLIST`
+  - 録画 1 件が HLS のセグメント 1 つ。2 件目からは毎回 `EXT-X-DISCONTINUITY`（ファイルごとに init とタイムスタンプが独立している）。録画のない区間は詰める（プレイヤーの時刻は壁時計と一致しない）
+  - セグメントごとに `EXT-X-PROGRAM-DATE-TIME`（`started_at`）を書く。UI はこれでプレイヤーの時刻と壁時計を対応づける
+  - 先頭の録画が `from` より前に始まるときは `EXT-X-START:TIME-OFFSET=<from - started_at>,PRECISE=YES` で `from` から再生を始める
+  - MediaMTX の fMP4 は 1 ファイルに init（`ftyp` + `moov`）とフラグメント（`moof` + `mdat`）が並ぶ。同じ presigned URL をバイト範囲で使い分ける: `EXT-X-MAP:URI="<url>",BYTERANGE="<init_size>@0"` と `EXT-X-BYTERANGE:<size - init_size>@<init_size>`。Range ヘッダーは署名に含まれず、Garage の CORS は `range` を許可している
+  - init の長さ（最初の `moof` の位置）は取り込みのときにトップレベルのボックスのヘッダーを読んで求め、`recordings.init_size` に保存する。NULL の行（この列より前に取り込んだもの）は、再生のときに先頭を Range で取得して求め、行を更新する。init が求められない録画（壊れたファイル）はプレイリストから外してログに残す
+  - presigned URL の有効期限は「範囲の長さ + 1h」（1h 以上、`VMS_PLAYBACK_URL_TTL_MAX`（既定 12h）以下）。長いほど漏れた URL が長く使え、短いほど長い再生の途中で切れる。切れたらクライアントがプレイリストを取り直す。プレイリストは URL を含むので `Cache-Control: no-store`
+- `GET /api/cameras/{id}/timeline?from=&to=&max_thumbnails=`（viewer）: タイムライン用の目録
+  - 録画がある区間: 録画を時刻順に並べ、隙間が 2 秒以下なら 1 つにまとめる。`[from, to)` に切り詰めて返す
+  - サムネイル: 範囲を `max_thumbnails`（既定 48、最大 200）個の等しい区間に分け、区間ごとに中央に一番近い録画のサムネイルを 1 つ選ぶ（presigned URL つき）。同じ録画は 1 回だけ
+- 範囲の録画を引く処理（`internal/playback` の `RecordingsInRange`）は切り出し（#14）でも使う
+
 ## DB（PostgreSQL）
 
 - PostgreSQL 18 以上（イメージは `postgres:18.x-alpine`）
@@ -138,7 +154,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 | `users` | username, password_hash (argon2id), role (`admin` / `viewer`) |
 | `sessions` | セッション Cookie に対応する |
 | `cameras` | name, main_url, sub_url, credentials_enc, retention_days, enabled |
-| `recordings` | camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key。インデックスは `(camera_id, started_at)` |
+| `recordings` | camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key, init_size（fMP4 の init の長さ）。インデックスは `(camera_id, started_at)` |
 | `pending_uploads` | local_path, attempts, uploaded_at（アップロードと登録が済んだ時刻。猶予が過ぎるまで行を残す）, uploaded_size, uploaded_mtime（消す前の照合用）, leased_until（処理中のリースの期限。処理中でなければ NULL） |
 | `events` | ディスク逼迫、アップロード失敗、カメラの切断など |
 

@@ -210,6 +210,59 @@ export interface paths {
         patch: operations["updateCamera"];
         trace?: never;
     };
+    "/cameras/{id}/playlist.m3u8": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * 録画の HLS VOD プレイリスト
+         * @description `[from, to)` と重なる録画を、セグメント単位（切らずに丸ごと）で並べた HLS（fMP4）の VOD プレイリスト。
+         *     設計は docs/design.md の「録画再生の詳細」。
+         *     - セグメントは Garage の presigned URL（`S3_ENDPOINT`）。同じ URL をバイト範囲で init（`EXT-X-MAP`）と本体に分ける。
+         *       URL は「範囲の長さ + 1 時間」（上限 `VMS_PLAYBACK_URL_TTL_MAX`）で切れるので、切れたら取り直す
+         *     - 録画ごとに `EXT-X-DISCONTINUITY`（2 件目から）と `EXT-X-PROGRAM-DATE-TIME`（録画の開始時刻）。録画のない区間は詰める
+         *     - 先頭の録画が `from` より前に始まるときは `EXT-X-START` で `from` から再生させる
+         *     - `from >= to`、範囲が `VMS_PLAYBACK_MAX_RANGE`（既定 24 時間）を超える、録画が 5000 件を超える場合は 400。
+         *       カメラがない、範囲に録画がない場合は 404。オブジェクトストレージが未設定なら 503
+         */
+        get: operations["getCameraPlaylist"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cameras/{id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * タイムライン用の録画の目録
+         * @description `[from, to)` の録画がある区間（隙間が 2 秒以下の録画はまとめる。範囲に切り詰める）と、
+         *     範囲を `max_thumbnails` 個に等分して区間ごとに 1 つ選んだサムネイル（presigned URL）。
+         *     範囲の制限とエラーはプレイリストと同じ（録画がなくても 200 で空の配列を返す）。
+         */
+        get: operations["getCameraTimeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/mediamtx/segment-complete": {
         parameters: {
             query?: never;
@@ -349,6 +402,38 @@ export interface components {
             /** @description Go の duration 形式（`1m0.002s`）。記録用で、長さは ffprobe で測る */
             segment_duration?: string;
         };
+        Timeline: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /** @description 録画がある区間（時刻順、重ならない、`[from, to)` に切り詰めたもの） */
+            intervals: components["schemas"]["TimelineInterval"][];
+            /** @description サムネイル（時刻順） */
+            thumbnails: components["schemas"]["TimelineThumbnail"][];
+            /**
+             * Format: date-time
+             * @description サムネイルの URL が切れる時刻
+             */
+            urls_expire_at: string;
+        };
+        TimelineInterval: {
+            /** Format: date-time */
+            start: string;
+            /** Format: date-time */
+            end: string;
+        };
+        TimelineThumbnail: {
+            /** Format: uuid */
+            recording_id: string;
+            /**
+             * Format: date-time
+             * @description サムネイルの時刻（録画の開始。先頭のキーフレーム）
+             */
+            time: string;
+            /** @description JPEG の presigned URL（Garage、`S3_ENDPOINT`） */
+            url: string;
+        };
         Health: {
             /** @enum {string} */
             status: "ok";
@@ -384,6 +469,10 @@ export interface components {
     parameters: {
         UserID: string;
         CameraID: string;
+        /** @description 範囲の開始（RFC 3339。`+09:00` などの `+` は `%2B` にする） */
+        PlaybackFrom: string;
+        /** @description 範囲の終わり（含まない。RFC 3339） */
+        PlaybackTo: string;
     };
     requestBodies: never;
     headers: {
@@ -759,6 +848,64 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Camera"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getCameraPlaylist: {
+        parameters: {
+            query: {
+                /** @description 範囲の開始（RFC 3339。`+09:00` などの `+` は `%2B` にする） */
+                from: components["parameters"]["PlaybackFrom"];
+                /** @description 範囲の終わり（含まない。RFC 3339） */
+                to: components["parameters"]["PlaybackTo"];
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description プレイリスト（presigned URL を含むので `Cache-Control: no-store`） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/vnd.apple.mpegurl": string;
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getCameraTimeline: {
+        parameters: {
+            query: {
+                /** @description 範囲の開始（RFC 3339。`+09:00` などの `+` は `%2B` にする） */
+                from: components["parameters"]["PlaybackFrom"];
+                /** @description 範囲の終わり（含まない。RFC 3339） */
+                to: components["parameters"]["PlaybackTo"];
+                /** @description 返すサムネイルの最大数（0 なら返さない） */
+                max_thumbnails?: number;
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description タイムライン */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Timeline"];
                 };
             };
             default: components["responses"]["Error"];

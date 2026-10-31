@@ -12,13 +12,9 @@ import (
 
 // newRetention builds the retention job, or returns nil when object storage
 // is not configured.
-func newRetention(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) (*retention.Job, error) {
-	if !cfg.S3.Configured() {
+func newRetention(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool, store *s3store.Store) (*retention.Job, error) {
+	if store == nil {
 		return nil, nil
-	}
-	store, err := s3store.New(cfg.S3.StoreConfig())
-	if err != nil {
-		return nil, err
 	}
 	return retention.New(retention.Options{
 		Catalog:  retention.NewPGCatalog(pool),
