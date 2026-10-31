@@ -153,6 +153,63 @@ export interface paths {
         patch: operations["updateUser"];
         trace?: never;
     };
+    "/cameras": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * カメラの一覧
+         * @description ライブ表示に使う最小限の項目だけを返す（URL などの設定は返さない）。
+         *     設定は admin が `GET /cameras/{id}` で取得する。
+         */
+        get: operations["listCameras"];
+        put?: never;
+        /**
+         * カメラを登録する
+         * @description URL に認証情報（`user:password@`）を入れると 400。認証情報は `credentials` で渡す（暗号化して保存し、返さない）。
+         *     名前が既にあれば 409。登録すると MediaMTX に path を反映する。
+         */
+        post: operations["createCamera"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cameras/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * カメラの設定を取得する
+         * @description 認証情報は返さない（`has_credentials` だけ）。
+         */
+        get: operations["getCamera"];
+        put?: never;
+        post?: never;
+        /**
+         * カメラを削除する
+         * @description 録画が残っているカメラは削除できない（409）。録画を止めるだけなら `enabled: false` にする。
+         */
+        delete: operations["deleteCamera"];
+        options?: never;
+        head?: never;
+        /**
+         * カメラの設定を変える
+         * @description 指定した項目だけを変える。認証情報は、`credentials` で置き換えるか `remove_credentials: true` で消す。
+         *     どちらもなければ今のものを残す。sub の URL は `remove_sub_url: true` で消す。
+         */
+        patch: operations["updateCamera"];
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -196,6 +253,68 @@ export interface components {
             current_password: string;
             new_password: components["schemas"]["NewPassword"];
         };
+        /** @description 1〜100 文字。前後の空白と制御文字は不可。一意 */
+        CameraName: string;
+        /**
+         * @description `rtsp://` か `rtsps://` の URL。認証情報（`user:password@`）は入れない（400）。
+         *     空白や ASCII 以外の文字はパーセントエンコードする。
+         */
+        RtspUrl: string;
+        /** @description 録画の保持日数 */
+        RetentionDays: number;
+        /** @description RTSP の認証情報。書き込み専用（暗号化して保存し、API は返さない） */
+        CameraCredentials: {
+            username: string;
+            password: string;
+        };
+        CameraSummary: {
+            /** Format: uuid */
+            id: string;
+            name: components["schemas"]["CameraName"];
+            enabled: boolean;
+            /** @description 多分割ライブ用の sub ストリームがあるか */
+            has_sub: boolean;
+        };
+        CameraSummaryList: {
+            cameras: components["schemas"]["CameraSummary"][];
+        };
+        Camera: {
+            /** Format: uuid */
+            id: string;
+            name: components["schemas"]["CameraName"];
+            main_url: components["schemas"]["RtspUrl"];
+            sub_url?: components["schemas"]["RtspUrl"];
+            /** @description 認証情報が設定されているか（認証情報そのものは返さない） */
+            has_credentials: boolean;
+            retention_days: components["schemas"]["RetentionDays"];
+            /** @description false なら MediaMTX から path を外す（接続も録画もしない） */
+            enabled: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        CameraCreate: {
+            name: components["schemas"]["CameraName"];
+            main_url: components["schemas"]["RtspUrl"];
+            sub_url?: components["schemas"]["RtspUrl"];
+            credentials?: components["schemas"]["CameraCredentials"];
+            retention_days?: components["schemas"]["RetentionDays"];
+            /** @description 省略時 true */
+            enabled?: boolean;
+        };
+        CameraUpdate: {
+            name?: components["schemas"]["CameraName"];
+            main_url?: components["schemas"]["RtspUrl"];
+            sub_url?: components["schemas"]["RtspUrl"];
+            /** @description true なら sub の URL を消す（`sub_url` と同時には指定できない） */
+            remove_sub_url?: boolean;
+            credentials?: components["schemas"]["CameraCredentials"];
+            /** @description true なら認証情報を消す（`credentials` と同時には指定できない） */
+            remove_credentials?: boolean;
+            retention_days?: components["schemas"]["RetentionDays"];
+            enabled?: boolean;
+        };
         Health: {
             /** @enum {string} */
             status: "ok";
@@ -230,6 +349,7 @@ export interface components {
     };
     parameters: {
         UserID: string;
+        CameraID: string;
     };
     requestBodies: never;
     headers: {
@@ -488,6 +608,123 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["User"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    listCameras: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 名前の順 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CameraSummaryList"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    createCamera: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CameraCreate"];
+            };
+        };
+        responses: {
+            /** @description 登録した */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Camera"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getCamera: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description カメラ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Camera"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    deleteCamera: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 削除した */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    updateCamera: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["CameraID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CameraUpdate"];
+            };
+        };
+        responses: {
+            /** @description 変更後のカメラ */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Camera"];
                 };
             };
             default: components["responses"]["Error"];
