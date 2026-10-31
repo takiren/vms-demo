@@ -1,0 +1,64 @@
+name: Web
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "api/openapi.yaml"
+      - ".github/workflows/web.yml"
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "api/openapi.yaml"
+      - ".github/workflows/web.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # pnpm のバージョンは web/package.json の packageManager
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: web/.node-version
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # openapi-typescript の生成物（src/api/schema.gen.ts）が api/openapi.yaml と一致しているか
+      - name: Check generated code is up to date
+        run: |
+          pnpm generate
+          git diff --exit-code -- .
+          untracked="$(git status --porcelain -- .)"
+          if [ -n "$untracked" ]; then
+            echo "$untracked"
+            echo "::error::generated files are not committed; run 'pnpm generate' in web/"
+            exit 1
+          fi
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm coverage
+
+      - name: Build
+        run: pnpm build

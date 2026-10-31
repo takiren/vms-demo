@@ -22,6 +22,7 @@ deploy/init-env.sh        # .env を作る（cp .env.example .env して CHANGE_
 docker compose up         # リポジトリ直下で。初回は ffmpeg のビルドに数分かかる
 ```
 
+- web: `cd web && pnpm install && pnpm dev`（[web/README.md](../web/README.md)）
 - リポジトリ直下の `compose.yaml` が `deploy/compose.yaml` を include し、直下の `.env` で変数を展開します（`deploy/` で `docker compose` を実行しないこと。`.env` が読まれない）
 - Linux では `.env` の `MEDIAMTX_UID` / `MEDIAMTX_GID` を自分の `id -u` / `id -g` にします（下記）
 - 止めるとき: `docker compose down`。データ（Postgres、Garage、Caddy の CA）も消すとき: `docker compose down -v` と `rm -rf deploy/data`
