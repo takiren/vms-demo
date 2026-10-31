@@ -183,7 +183,9 @@ func TestIntegrationPlaylistAgainstGarage(t *testing.T) {
 			if err := os.WriteFile(f, whole, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			out, err := exec.CommandContext(ctx, ff, "-nostdin", "-v", "error", "-xerror", "-i", "file:"+f, "-f", "null", "-").CombinedOutput() //nolint:gosec // G204: test
+			out, err := exec.CommandContext(ctx, ff, "-nostdin", "-v", "error", "-xerror", "-i", "file:"+f,
+				// The LGPL build has no audio decoder or wrapped_avframe; decode every video frame into mjpeg.
+				"-map", "0:v:0", "-c:v", "mjpeg", "-f", "null", "-").CombinedOutput() //nolint:gosec // G204: test
 			if err != nil {
 				t.Errorf("segment %d does not decode: %v %s", i, err, out)
 			}
