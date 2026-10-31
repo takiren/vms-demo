@@ -65,15 +65,18 @@ type Options struct {
 	// requests. If nil, issueLiveToken responds 503 and every MediaMTX
 	// callback is rejected (401).
 	Live LiveAuthService
+	// Playback serves recorded video. Nil disables it (503).
+	Playback PlaybackService
 }
 
 // Handlers implements gen.StrictServerInterface.
 type Handlers struct {
-	auth    AuthService
-	logger  *slog.Logger
-	cameras CameraService
-	ingest  IngestService
-	live    LiveAuthService
+	auth     AuthService
+	logger   *slog.Logger
+	cameras  CameraService
+	ingest   IngestService
+	live     LiveAuthService
+	playback PlaybackService
 }
 
 var _ gen.StrictServerInterface = (*Handlers)(nil)
@@ -118,7 +121,7 @@ func New(logger *slog.Logger, opts Options) (*echo.Echo, error) {
 		validator,
 	)
 
-	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest, live: opts.Live}
+	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest, live: opts.Live, playback: opts.Playback}
 	strict := gen.NewStrictHandler(h, []gen.StrictMiddlewareFunc{strictAuthorize(policies)})
 	gen.RegisterHandlersWithBaseURL(e, strict, BasePath)
 

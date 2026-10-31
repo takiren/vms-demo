@@ -131,9 +131,21 @@ func serve() error {
 		return err
 	}
 
-	ingestSvc, err := newIngest(logger, cfg, pool)
+	store, err := newStore(cfg)
 	if err != nil {
 		return err
+	}
+	ingestSvc, err := newIngest(logger, cfg, pool, store)
+	if err != nil {
+		return err
+	}
+	var playbackAPI api.PlaybackService
+	if pb, err := newPlayback(logger, cfg, pool, store); err != nil {
+		return err
+	} else if pb != nil {
+		playbackAPI = pb
+	} else {
+		logger.Warn("recording playback is disabled (" + config.EnvS3Endpoint + " is not set)")
 	}
 	var ingestAPI api.IngestService
 	if ingestSvc != nil {
@@ -177,6 +189,7 @@ func serve() error {
 		HookToken:      cfg.Ingest.HookToken.Value(),
 		Ingest:         ingestAPI,
 		Live:           live,
+		Playback:       playbackAPI,
 	})
 	if err != nil {
 		return err

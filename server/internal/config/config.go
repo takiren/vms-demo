@@ -122,6 +122,8 @@ type Config struct {
 	// MediaMTXAuthSecret is the Basic password MediaMTX presents to the
 	// API's auth endpoint (in the userinfo of its authHTTPAddress).
 	MediaMTXAuthSecret Secret
+	// Playback is recording playback. See playback.go.
+	Playback PlaybackConfig
 }
 
 // LogValue implements slog.LogValuer so that the whole config can be logged
@@ -147,6 +149,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Any("ingest", c.Ingest),
 		slog.Any("retention", c.Retention),
 		slog.Any("mediamtx_auth_secret", c.MediaMTXAuthSecret),
+		slog.Any("playback", c.Playback),
 	)
 }
 
@@ -337,6 +340,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	errs = loadMediaMTX(lookup, get, &cfg, errs)
 	errs = loadStorage(get, &cfg, errs)
 	errs = loadRetention(get, &cfg, errs)
+	errs = loadPlayback(get, &cfg, errs)
 
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
