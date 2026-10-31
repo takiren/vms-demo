@@ -58,7 +58,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
    3. `recordings` に登録する
 4. アップロードと DB 登録が成功したら、ローカルのファイルを消す。猶予は最短 1 時間
 5. Garage に障害があるときは、ローカルに溜めてリトライし続ける
-6. ディスク使用率が 90% を超えたら、未アップロードの古いものから捨てて `events` に記録する。録画は止めない
+6. ディスク使用率が 90% を超えたら、アップロード済みのものから、それでも足りなければ未アップロードの古いものから捨てて `events` に記録する。録画は止めない
 
 ### 取り込みの詳細
 
@@ -78,10 +78,28 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 - リース（既定 15 分）を失ったワーカーは、行もファイルも変更しない。シャットダウンで中断したときは、リースを手放す（`attempts` は増やさない）
 - ffmpeg / ffprobe には最小限の環境変数だけを渡す（API の環境には S3 の鍵やフックのトークンがある）。入力は `file:` を付けて渡す
 
+### ディスク逼迫時の処理
+
+- API が録画ディレクトリのファイルシステムの使用率を定期的に（`VMS_DISK_CHECK_INTERVAL`、既定 30 秒）確かめる。使用率は `df` の Use% と同じ計算（`(blocks - bfree) / (blocks - bfree + bavail)`。root 用の予約ブロックは使えない領域として分母から除く）
+- 使用率が `VMS_DISK_HIGH_WATERMARK`（既定 90%）以上になったら、`VMS_DISK_LOW_WATERMARK`（既定 85%）を下回るまで、次の順にローカルのファイルを消す（ヒステリシス）。1 つ消すたびに使用率を測り直す
+  1. アップロード済みの行（`uploaded_at` あり）を古い順に。猶予（`VMS_INGEST_DELETE_GRACE`）が過ぎていなくても消す。猶予は安全のための余裕で、ディスクが一杯のときは Garage にあるコピーから捨てるのが正しい。消す前の照合は猶予後の削除と同じ（サイズと mtime、Garage の HEAD）。HEAD が「ない」「サイズが違う」と答えたら、消さずにアップロードし直させる
+     - HEAD そのものが失敗した（Garage に届かない、5xx、タイムアウト）ときは、アップロード時の記録で代える: ローカルのサイズと mtime が `uploaded_size` / `uploaded_mtime` と同じで、`recordings` に同じ `object_key` と `size_bytes` の行があれば消す。Garage が落ちている間に、アップロード済みのコピーを残して唯一のコピー（未アップロード）を捨てるのを避けるため。記録もなければ元の予定に戻す
+     - この代わりの照合はディスク逼迫時だけ。猶予後の通常の削除は HEAD の成功を必須のままにする
+     - 消したコピーは 1 件ずつ `events` に `disk_pressure`（`action: uploaded_copy_removed`、`verified: head` か `upload_record`）を記録する
+  2. それでも足りなければ、未アップロードの行を古い順に捨てる。1 ファイルごとに `events` に `disk_pressure`（`action: segment_discarded`、camera_id、パス、サイズ、開始時刻）を記録する。捨てるのは逼迫したときだけで、1 ファイルが 1 分の録画に当たるので、件数はディスクの容量で抑えられる
+- 対象は `pending_uploads` の行だけ。先にディレクトリ走査で、まだ積まれていないファイルを積む。行のないファイル（カメラが DB にない path など）には触らない
+- path ごとに一番新しいファイル（書き込み中かもしれない）は、どちらの段階でも消さない。パスの検証は取り込みと同じ（録画ディレクトリの外やシンボリックリンクには触らない）
+- ワーカーと同じリースで行を取る。ワーカーが処理中の行（`leased_until` が未来）は飛ばす。猶予中やバックオフ中で待っている行は取れる。消さなかった行は、取る前の `next_attempt_at` に戻す
+- 録画は止めない。失敗はログに出して、次の確認でやり直す。何も消せずに閾値を超えたままのときは、`disk_pressure`（`action: unresolved`）を 10 分に 1 回だけ記録する
+
 ### 保持期間
 
 - 保持期間はカメラごとの `retention_days`（デフォルト 7 日）
-- 10 分ごとのジョブが、期限切れのものを S3 の DeleteObjects で消す。削除に成功したものだけ DB からも消す
+- 10 分ごと（`VMS_RETENTION_INTERVAL`）のジョブが、期限切れのものを S3 の DeleteObjects で消す。削除に成功したものだけ DB からも消す
+  - 期限切れは `ended_at` が `retention_days` より前のもの（保持期間に少しでもかかる録画は消さない）
+  - 500 件ずつ古い順に（`started_at`, `id` のキーセットで）処理する。動画とサムネイルを同じ DeleteObjects で消し、両方（サムネイルがあれば）が削除に成功した録画だけ DB から消す。存在しないキーも削除の成功として返る（S3 の仕様、Garage でも同じ）ので、前回の途中で失敗したものは次の実行で片づく
+  - 失敗したものは DB に残し、ログと `events`（`retention_delete_failed`、1 回の実行で 1 件にまとめる）に記録して次の実行でやり直す
+  - 複数のプロセスが同時に走らないよう、PostgreSQL の advisory lock（取れなければその回は何もしない）を取る
 - Garage の lifecycle には頼らない
 
 ## ストレージ（Garage）
@@ -121,7 +139,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 | `sessions` | セッション Cookie に対応する |
 | `cameras` | name, main_url, sub_url, credentials_enc, retention_days, enabled |
 | `recordings` | camera_id, started_at, ended_at, object_key, size_bytes, thumbnail_key。インデックスは `(camera_id, started_at)` |
-| `pending_uploads` | local_path, attempts, uploaded_at（アップロードと登録が済んだ時刻。猶予が過ぎるまで行を残す）, uploaded_size, uploaded_mtime（消す前の照合用） |
+| `pending_uploads` | local_path, attempts, uploaded_at（アップロードと登録が済んだ時刻。猶予が過ぎるまで行を残す）, uploaded_size, uploaded_mtime（消す前の照合用）, leased_until（処理中のリースの期限。処理中でなければ NULL） |
 | `events` | ディスク逼迫、アップロード失敗、カメラの切断など |
 
 - RTSP の認証情報は AES-256-GCM で暗号化する。鍵は環境変数 `VMS_SECRET_KEY` で渡す
@@ -132,6 +150,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 - `sessions` にはセッショントークンの SHA-256 だけを保存する。生のトークンは保存しない
 - `cameras.main_url` / `sub_url` に認証情報（userinfo、`user:pass@`）を入れない。CHECK で拒否する
 - `pending_uploads` は `next_attempt_at` をリースにする。完了（削除）と失敗の記録は、取得時に返った `next_attempt_at` が一致するときだけ成功する（リースを失ったワーカーは書き換えられない）
+  - 取得したときは `leased_until` にもリースの期限を入れ、処理を終えたら（失敗、完了、戻し）NULL にする。待っている行と処理中の行を区別するため（ディスク逼迫時の処理が使う）
 - 外部キーの `ON DELETE`
   - `sessions.user_id`: CASCADE（ユーザーを消したらセッションも消す）
   - `recordings.camera_id`: RESTRICT（録画が残っているカメラは消せない。先に S3 のオブジェクトと目録を消す。目録だけが消えて Garage にオブジェクトが残るのを防ぐ）

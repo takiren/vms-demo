@@ -39,6 +39,17 @@ type Queue interface {
 	Delete(ctx context.Context, row sqlc.PendingUpload) (ok bool, err error)
 	// Event appends to the events table.
 	Event(ctx context.Context, kind string, cameraID *uuid.UUID, payload map[string]any) error
+
+	// ClaimForDiskPressure leases the oldest row that is uploaded (or not)
+	// and not being processed, even if it is not due yet, skipping
+	// excludePaths and excludeIDs. It returns nil when there is none, and
+	// the row's next_attempt_at before the claim (for RestoreSchedule).
+	ClaimForDiskPressure(ctx context.Context, uploaded bool, leaseUntil time.Time, excludePaths []string, excludeIDs []uuid.UUID) (row *sqlc.PendingUpload, previous time.Time, err error)
+	// RestoreSchedule gives a claimed row back with next_attempt_at = next.
+	RestoreSchedule(ctx context.Context, row sqlc.PendingUpload, next time.Time) (ok bool, err error)
+	// RecordingSize returns the size_bytes of the recording with objectKey;
+	// exists is false when there is none.
+	RecordingSize(ctx context.Context, objectKey string) (size int64, exists bool, err error)
 }
 
 // ErrObjectKeyConflict means another recording (a different camera or
@@ -161,4 +172,56 @@ func (p *PGQueue) Event(ctx context.Context, kind string, cameraID *uuid.UUID, p
 	}
 	_, err = p.q.InsertEvent(ctx, sqlc.InsertEventParams{Kind: kind, CameraID: cameraID, Payload: b})
 	return err
+}
+
+// ClaimForDiskPressure implements Queue.
+func (p *PGQueue) ClaimForDiskPressure(ctx context.Context, uploaded bool, leaseUntil time.Time, excludePaths []string, excludeIDs []uuid.UUID) (*sqlc.PendingUpload, time.Time, error) {
+	// NULL arrays would make "<> ALL" match nothing.
+	if excludePaths == nil {
+		excludePaths = []string{}
+	}
+	if excludeIDs == nil {
+		excludeIDs = []uuid.UUID{}
+	}
+	r, err := p.q.ClaimPendingUploadForDiskPressure(ctx, sqlc.ClaimPendingUploadForDiskPressureParams{
+		LeaseUntil:   leaseUntil,
+		Uploaded:     uploaded,
+		ExcludePaths: excludePaths,
+		ExcludeIds:   excludeIDs,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, time.Time{}, nil
+	}
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return &sqlc.PendingUpload{
+		ID:            r.ID,
+		LocalPath:     r.LocalPath,
+		Attempts:      r.Attempts,
+		LastError:     r.LastError,
+		NextAttemptAt: r.NextAttemptAt,
+		CreatedAt:     r.CreatedAt,
+		UploadedAt:    r.UploadedAt,
+		UploadedSize:  r.UploadedSize,
+		UploadedMtime: r.UploadedMtime,
+		LeasedUntil:   r.LeasedUntil,
+	}, r.PreviousNextAttemptAt, nil
+}
+
+// RestoreSchedule implements Queue.
+func (p *PGQueue) RestoreSchedule(ctx context.Context, row sqlc.PendingUpload, next time.Time) (bool, error) {
+	n, err := p.q.RestorePendingUploadSchedule(ctx, sqlc.RestorePendingUploadScheduleParams{
+		NextAttemptAt: next, ID: row.ID, LeaseUntil: row.NextAttemptAt,
+	})
+	return n > 0, err
+}
+
+// RecordingSize implements Queue.
+func (p *PGQueue) RecordingSize(ctx context.Context, objectKey string) (int64, bool, error) {
+	n, err := p.q.GetRecordingSizeByObjectKey(ctx, objectKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return n, err == nil, err
 }

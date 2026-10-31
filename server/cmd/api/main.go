@@ -145,6 +145,18 @@ func serve() error {
 		logger.Warn("recording ingest is disabled (" + config.EnvRecordingsDir + " is not set)")
 	}
 
+	retentionJob, err := newRetention(logger, cfg, pool)
+	if err != nil {
+		return err
+	}
+	if retentionJob != nil {
+		done := make(chan struct{})
+		go func() { defer close(done); retentionJob.Run(ctx) }()
+		defer func() { <-done }()
+	} else {
+		logger.Warn("the retention job is disabled (object storage is not configured)")
+	}
+
 	e, err := api.New(logger, api.Options{
 		Auth:           svc,
 		PublicOrigin:   cfg.PublicOrigin,

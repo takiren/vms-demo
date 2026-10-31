@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -31,7 +32,9 @@ type fakeQueue struct {
 	stealLease bool
 	released   int
 	requeued   int
+	restored   int
 	claimErr   error
+	recSizeErr error
 }
 
 type fakeEvent struct {
@@ -85,6 +88,8 @@ func (q *fakeQueue) Claim(_ context.Context, leaseUntil time.Time) (*sqlc.Pendin
 	}
 	sort.Slice(due, func(i, j int) bool { return due[i].CreatedAt.Before(due[j].CreatedAt) })
 	due[0].NextAttemptAt = leaseUntil
+	lu := leaseUntil
+	due[0].LeasedUntil = &lu
 	c := *due[0]
 	return &c, nil
 }
@@ -115,6 +120,7 @@ func (q *fakeQueue) Fail(_ context.Context, row sqlc.PendingUpload, lastError st
 	r.Attempts++
 	r.LastError = &lastError
 	r.NextAttemptAt = next
+	r.LeasedUntil = nil
 	return *r, true, nil
 }
 
@@ -136,6 +142,7 @@ func (q *fakeQueue) Complete(_ context.Context, row sqlc.PendingUpload, rec sqlc
 	r.UploadedSize, r.UploadedMtime = &size, &mt
 	r.LastError = nil
 	r.NextAttemptAt = now.Add(deleteAfter)
+	r.LeasedUntil = nil
 	return true, nil
 }
 
@@ -149,6 +156,7 @@ func (q *fakeQueue) Requeue(_ context.Context, row sqlc.PendingUpload, reason st
 	r.UploadedAt, r.UploadedSize, r.UploadedMtime = nil, nil, nil
 	r.LastError = &reason
 	r.NextAttemptAt = q.now()
+	r.LeasedUntil = nil
 	q.requeued++
 	return true, nil
 }
@@ -158,6 +166,7 @@ func (q *fakeQueue) Release(_ context.Context, row sqlc.PendingUpload) error {
 	defer q.mu.Unlock()
 	if r := q.leased(row); r != nil {
 		r.NextAttemptAt = q.now()
+		r.LeasedUntil = nil
 		q.released++
 	}
 	return nil
@@ -178,6 +187,62 @@ func (q *fakeQueue) Event(_ context.Context, kind string, cam *uuid.UUID, payloa
 	defer q.mu.Unlock()
 	q.events = append(q.events, fakeEvent{kind, cam, payload})
 	return nil
+}
+
+func (q *fakeQueue) ClaimForDiskPressure(_ context.Context, uploaded bool, leaseUntil time.Time, excludePaths []string, excludeIDs []uuid.UUID) (*sqlc.PendingUpload, time.Time, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.claimErr != nil {
+		return nil, time.Time{}, q.claimErr
+	}
+	var cands []*sqlc.PendingUpload
+	for _, r := range q.rows {
+		if (r.UploadedAt != nil) != uploaded || slices.Contains(excludePaths, r.LocalPath) || slices.Contains(excludeIDs, r.ID) {
+			continue
+		}
+		if r.LeasedUntil != nil && r.LeasedUntil.After(q.now()) {
+			continue
+		}
+		cands = append(cands, r)
+	}
+	if len(cands) == 0 {
+		return nil, time.Time{}, nil
+	}
+	// Ties (one scan, frozen clock) in enqueue order, which is name order.
+	sort.Slice(cands, func(i, j int) bool {
+		if !cands[i].CreatedAt.Equal(cands[j].CreatedAt) {
+			return cands[i].CreatedAt.Before(cands[j].CreatedAt)
+		}
+		return cands[i].LocalPath < cands[j].LocalPath
+	})
+	r := cands[0]
+	prev := r.NextAttemptAt
+	lu := leaseUntil
+	r.NextAttemptAt, r.LeasedUntil = leaseUntil, &lu
+	c := *r
+	return &c, prev, nil
+}
+
+func (q *fakeQueue) RestoreSchedule(_ context.Context, row sqlc.PendingUpload, next time.Time) (bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	r := q.leased(row)
+	if r == nil {
+		return false, nil
+	}
+	r.NextAttemptAt, r.LeasedUntil = next, nil
+	q.restored++
+	return true, nil
+}
+
+func (q *fakeQueue) RecordingSize(_ context.Context, key string) (int64, bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.recSizeErr != nil {
+		return 0, false, q.recSizeErr
+	}
+	r, ok := q.recs[key]
+	return r.SizeBytes, ok, nil
 }
 
 func (q *fakeQueue) only(t *testing.T) sqlc.PendingUpload {
@@ -280,6 +345,7 @@ func (c *clock) Now() time.Time          { c.mu.Lock(); defer c.mu.Unlock(); ret
 func (c *clock) Advance(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
 
 type harness struct {
+	t     *testing.T
 	svc   *Service
 	q     *fakeQueue
 	store *fakeStore

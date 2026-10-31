@@ -14,7 +14,8 @@ import (
 
 const claimPendingUploads = `-- name: ClaimPendingUploads :many
 UPDATE pending_uploads
-SET next_attempt_at = $1
+SET next_attempt_at = $1,
+    leased_until = $1
 WHERE id IN (
     SELECT p.id FROM pending_uploads p
     WHERE p.next_attempt_at <= now()
@@ -22,7 +23,7 @@ WHERE id IN (
     LIMIT $2
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime, leased_until
 `
 
 type ClaimPendingUploadsParams struct {
@@ -33,6 +34,7 @@ type ClaimPendingUploadsParams struct {
 // ClaimPendingUploads は処理できる行を古い順に取り、next_attempt_at を lease_until に進めて返す。
 // 処理中に落ちても、リースが切れれば別のワーカーが拾い直す。
 // 返った行の next_attempt_at がリースの証明になる。MarkPendingUploadFailed と DeletePendingUpload に渡す。
+// leased_until にも同じ期限を入れる（処理中の印。処理を終える更新はすべて NULL に戻す）。
 func (q *Queries) ClaimPendingUploads(ctx context.Context, arg ClaimPendingUploadsParams) ([]PendingUpload, error) {
 	rows, err := q.db.Query(ctx, claimPendingUploads, arg.LeaseUntil, arg.MaxRows)
 	if err != nil {
@@ -52,6 +54,7 @@ func (q *Queries) ClaimPendingUploads(ctx context.Context, arg ClaimPendingUploa
 			&i.UploadedAt,
 			&i.UploadedSize,
 			&i.UploadedMtime,
+			&i.LeasedUntil,
 		); err != nil {
 			return nil, err
 		}
@@ -101,7 +104,7 @@ func (q *Queries) EnqueuePendingUpload(ctx context.Context, localPath string) (i
 }
 
 const listOldestPendingUploads = `-- name: ListOldestPendingUploads :many
-SELECT id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime FROM pending_uploads
+SELECT id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime, leased_until FROM pending_uploads
 ORDER BY created_at
 LIMIT $1
 `
@@ -126,6 +129,7 @@ func (q *Queries) ListOldestPendingUploads(ctx context.Context, limit int32) ([]
 			&i.UploadedAt,
 			&i.UploadedSize,
 			&i.UploadedMtime,
+			&i.LeasedUntil,
 		); err != nil {
 			return nil, err
 		}
@@ -141,10 +145,11 @@ const markPendingUploadFailed = `-- name: MarkPendingUploadFailed :one
 UPDATE pending_uploads
 SET attempts = attempts + 1,
     last_error = $1,
-    next_attempt_at = $2
+    next_attempt_at = $2,
+    leased_until = NULL
 WHERE id = $3
   AND next_attempt_at = $4
-RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime, leased_until
 `
 
 type MarkPendingUploadFailedParams struct {
@@ -176,6 +181,7 @@ func (q *Queries) MarkPendingUploadFailed(ctx context.Context, arg MarkPendingUp
 		&i.UploadedAt,
 		&i.UploadedSize,
 		&i.UploadedMtime,
+		&i.LeasedUntil,
 	)
 	return i, err
 }
@@ -186,10 +192,11 @@ SET uploaded_at = now(),
     uploaded_size = $1,
     uploaded_mtime = $2,
     last_error = NULL,
-    next_attempt_at = now() + make_interval(secs => $3::double precision)
+    next_attempt_at = now() + make_interval(secs => $3::double precision),
+    leased_until = NULL
 WHERE id = $4
   AND next_attempt_at = $5
-RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime
+RETURNING id, local_path, attempts, last_error, next_attempt_at, created_at, uploaded_at, uploaded_size, uploaded_mtime, leased_until
 `
 
 type MarkPendingUploadUploadedParams struct {
@@ -224,13 +231,15 @@ func (q *Queries) MarkPendingUploadUploaded(ctx context.Context, arg MarkPending
 		&i.UploadedAt,
 		&i.UploadedSize,
 		&i.UploadedMtime,
+		&i.LeasedUntil,
 	)
 	return i, err
 }
 
 const releasePendingUpload = `-- name: ReleasePendingUpload :execrows
 UPDATE pending_uploads
-SET next_attempt_at = now()
+SET next_attempt_at = now(),
+    leased_until = NULL
 WHERE id = $1
   AND next_attempt_at = $2
 `
@@ -256,7 +265,8 @@ SET uploaded_at = NULL,
     uploaded_size = NULL,
     uploaded_mtime = NULL,
     last_error = $1,
-    next_attempt_at = now()
+    next_attempt_at = now(),
+    leased_until = NULL
 WHERE id = $2
   AND next_attempt_at = $3
 `

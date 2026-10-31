@@ -8,8 +8,10 @@ ON CONFLICT (local_path) DO NOTHING;
 -- ClaimPendingUploads は処理できる行を古い順に取り、next_attempt_at を lease_until に進めて返す。
 -- 処理中に落ちても、リースが切れれば別のワーカーが拾い直す。
 -- 返った行の next_attempt_at がリースの証明になる。MarkPendingUploadFailed と DeletePendingUpload に渡す。
+-- leased_until にも同じ期限を入れる（処理中の印。処理を終える更新はすべて NULL に戻す）。
 UPDATE pending_uploads
-SET next_attempt_at = sqlc.arg(lease_until)
+SET next_attempt_at = sqlc.arg(lease_until),
+    leased_until = sqlc.arg(lease_until)
 WHERE id IN (
     SELECT p.id FROM pending_uploads p
     WHERE p.next_attempt_at <= now()
@@ -27,7 +29,8 @@ RETURNING *;
 UPDATE pending_uploads
 SET attempts = attempts + 1,
     last_error = sqlc.arg(last_error),
-    next_attempt_at = sqlc.arg(next_attempt_at)
+    next_attempt_at = sqlc.arg(next_attempt_at),
+    leased_until = NULL
 WHERE id = sqlc.arg(id)
   AND next_attempt_at = sqlc.arg(lease_until)
 RETURNING *;
@@ -57,7 +60,8 @@ SET uploaded_at = now(),
     uploaded_size = sqlc.arg(uploaded_size),
     uploaded_mtime = sqlc.arg(uploaded_mtime),
     last_error = NULL,
-    next_attempt_at = now() + make_interval(secs => sqlc.arg(delete_after_seconds)::double precision)
+    next_attempt_at = now() + make_interval(secs => sqlc.arg(delete_after_seconds)::double precision),
+    leased_until = NULL
 WHERE id = sqlc.arg(id)
   AND next_attempt_at = sqlc.arg(lease_until)
 RETURNING *;
@@ -71,7 +75,8 @@ SET uploaded_at = NULL,
     uploaded_size = NULL,
     uploaded_mtime = NULL,
     last_error = sqlc.arg(reason),
-    next_attempt_at = now()
+    next_attempt_at = now(),
+    leased_until = NULL
 WHERE id = sqlc.arg(id)
   AND next_attempt_at = sqlc.arg(lease_until);
 
@@ -79,6 +84,7 @@ WHERE id = sqlc.arg(id)
 -- ReleasePendingUpload はシャットダウンなどで処理を中断したとき、リースを手放してすぐに取り直せるようにする。
 -- attempts は増やさない。lease_until は Claim が返した next_attempt_at。
 UPDATE pending_uploads
-SET next_attempt_at = now()
+SET next_attempt_at = now(),
+    leased_until = NULL
 WHERE id = sqlc.arg(id)
   AND next_attempt_at = sqlc.arg(lease_until);
