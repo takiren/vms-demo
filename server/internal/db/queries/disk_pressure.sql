@@ -36,3 +36,9 @@ SET next_attempt_at = sqlc.arg(next_attempt_at),
     leased_until = NULL
 WHERE id = sqlc.arg(id)
   AND next_attempt_at = sqlc.arg(lease_until);
+
+-- name: GetRecordingSizeByObjectKey :one
+-- GetRecordingSizeByObjectKey はディスク逼迫時に、Garage の HEAD が失敗したときの代わりの照合に使う
+-- （アップロード時に登録した recordings の行が、同じキーとサイズで残っているか）。なければ pgx.ErrNoRows。
+SELECT size_bytes FROM recordings
+WHERE object_key = $1;

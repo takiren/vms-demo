@@ -37,6 +37,12 @@ func TestPGQueueDiskPressureClaim(t *testing.T) {
 	if ok, err := q.Complete(ctx, *up, rec, time.Now(), time.Hour); err != nil || !ok {
 		t.Fatalf("Complete = %v, %v", ok, err)
 	}
+	if n, ok, err := q.RecordingSize(ctx, "u.mp4"); err != nil || !ok || n != 1 {
+		t.Fatalf("RecordingSize = %d, %v, %v", n, ok, err)
+	}
+	if _, ok, err := q.RecordingSize(ctx, "nope.mp4"); err != nil || ok {
+		t.Fatalf("RecordingSize of a missing key = %v, %v", ok, err)
+	}
 	// "waiting" is in backoff.
 	w, _ := q.Claim(ctx, lease())
 	if _, ok, err := q.Fail(ctx, *w, "x", time.Now().Add(time.Hour)); err != nil || !ok {

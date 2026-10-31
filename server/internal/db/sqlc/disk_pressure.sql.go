@@ -88,6 +88,20 @@ func (q *Queries) ClaimPendingUploadForDiskPressure(ctx context.Context, arg Cla
 	return i, err
 }
 
+const getRecordingSizeByObjectKey = `-- name: GetRecordingSizeByObjectKey :one
+SELECT size_bytes FROM recordings
+WHERE object_key = $1
+`
+
+// GetRecordingSizeByObjectKey はディスク逼迫時に、Garage の HEAD が失敗したときの代わりの照合に使う
+// （アップロード時に登録した recordings の行が、同じキーとサイズで残っているか）。なければ pgx.ErrNoRows。
+func (q *Queries) GetRecordingSizeByObjectKey(ctx context.Context, objectKey string) (int64, error) {
+	row := q.db.QueryRow(ctx, getRecordingSizeByObjectKey, objectKey)
+	var size_bytes int64
+	err := row.Scan(&size_bytes)
+	return size_bytes, err
+}
+
 const restorePendingUploadSchedule = `-- name: RestorePendingUploadSchedule :execrows
 UPDATE pending_uploads
 SET next_attempt_at = $1,

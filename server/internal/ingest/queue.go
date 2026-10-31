@@ -47,6 +47,9 @@ type Queue interface {
 	ClaimForDiskPressure(ctx context.Context, uploaded bool, leaseUntil time.Time, excludePaths []string, excludeIDs []uuid.UUID) (row *sqlc.PendingUpload, previous time.Time, err error)
 	// RestoreSchedule gives a claimed row back with next_attempt_at = next.
 	RestoreSchedule(ctx context.Context, row sqlc.PendingUpload, next time.Time) (ok bool, err error)
+	// RecordingSize returns the size_bytes of the recording with objectKey;
+	// exists is false when there is none.
+	RecordingSize(ctx context.Context, objectKey string) (size int64, exists bool, err error)
 }
 
 // ErrObjectKeyConflict means another recording (a different camera or
@@ -212,4 +215,13 @@ func (p *PGQueue) RestoreSchedule(ctx context.Context, row sqlc.PendingUpload, n
 		NextAttemptAt: next, ID: row.ID, LeaseUntil: row.NextAttemptAt,
 	})
 	return n > 0, err
+}
+
+// RecordingSize implements Queue.
+func (p *PGQueue) RecordingSize(ctx context.Context, objectKey string) (int64, bool, error) {
+	n, err := p.q.GetRecordingSizeByObjectKey(ctx, objectKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return n, err == nil, err
 }

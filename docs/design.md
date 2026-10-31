@@ -82,7 +82,10 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 
 - API が録画ディレクトリのファイルシステムの使用率を定期的に（`VMS_DISK_CHECK_INTERVAL`、既定 30 秒）確かめる。使用率は `df` の Use% と同じ計算（`(blocks - bfree) / (blocks - bfree + bavail)`。root 用の予約ブロックは使えない領域として分母から除く）
 - 使用率が `VMS_DISK_HIGH_WATERMARK`（既定 90%）以上になったら、`VMS_DISK_LOW_WATERMARK`（既定 85%）を下回るまで、次の順にローカルのファイルを消す（ヒステリシス）。1 つ消すたびに使用率を測り直す
-  1. アップロード済みの行（`uploaded_at` あり）を古い順に。猶予（`VMS_INGEST_DELETE_GRACE`）が過ぎていなくても消す。猶予は安全のための余裕で、ディスクが一杯のときは Garage にあるコピーから捨てるのが正しい。消す前の照合は猶予後の削除と同じ（サイズと mtime、Garage の HEAD）。合わなければ消さずにアップロードし直させ、HEAD が失敗したら元の予定に戻す
+  1. アップロード済みの行（`uploaded_at` あり）を古い順に。猶予（`VMS_INGEST_DELETE_GRACE`）が過ぎていなくても消す。猶予は安全のための余裕で、ディスクが一杯のときは Garage にあるコピーから捨てるのが正しい。消す前の照合は猶予後の削除と同じ（サイズと mtime、Garage の HEAD）。HEAD が「ない」「サイズが違う」と答えたら、消さずにアップロードし直させる
+     - HEAD そのものが失敗した（Garage に届かない、5xx、タイムアウト）ときは、アップロード時の記録で代える: ローカルのサイズと mtime が `uploaded_size` / `uploaded_mtime` と同じで、`recordings` に同じ `object_key` と `size_bytes` の行があれば消す。Garage が落ちている間に、アップロード済みのコピーを残して唯一のコピー（未アップロード）を捨てるのを避けるため。記録もなければ元の予定に戻す
+     - この代わりの照合はディスク逼迫時だけ。猶予後の通常の削除は HEAD の成功を必須のままにする
+     - 消したコピーは 1 件ずつ `events` に `disk_pressure`（`action: uploaded_copy_removed`、`verified: head` か `upload_record`）を記録する
   2. それでも足りなければ、未アップロードの行を古い順に捨てる。1 ファイルごとに `events` に `disk_pressure`（`action: segment_discarded`、camera_id、パス、サイズ、開始時刻）を記録する。捨てるのは逼迫したときだけで、1 ファイルが 1 分の録画に当たるので、件数はディスクの容量で抑えられる
 - 対象は `pending_uploads` の行だけ。先にディレクトリ走査で、まだ積まれていないファイルを積む。行のないファイル（カメラが DB にない path など）には触らない
 - path ごとに一番新しいファイル（書き込み中かもしれない）は、どちらの段階でも消さない。パスの検証は取り込みと同じ（録画ディレクトリの外やシンボリックリンクには触らない）

@@ -34,6 +34,7 @@ type fakeQueue struct {
 	requeued   int
 	restored   int
 	claimErr   error
+	recSizeErr error
 }
 
 type fakeEvent struct {
@@ -234,6 +235,16 @@ func (q *fakeQueue) RestoreSchedule(_ context.Context, row sqlc.PendingUpload, n
 	return true, nil
 }
 
+func (q *fakeQueue) RecordingSize(_ context.Context, key string) (int64, bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.recSizeErr != nil {
+		return 0, false, q.recSizeErr
+	}
+	r, ok := q.recs[key]
+	return r.SizeBytes, ok, nil
+}
+
 func (q *fakeQueue) only(t *testing.T) sqlc.PendingUpload {
 	t.Helper()
 	q.mu.Lock()
@@ -334,6 +345,7 @@ func (c *clock) Now() time.Time          { c.mu.Lock(); defer c.mu.Unlock(); ret
 func (c *clock) Advance(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
 
 type harness struct {
+	t     *testing.T
 	svc   *Service
 	q     *fakeQueue
 	store *fakeStore

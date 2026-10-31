@@ -149,7 +149,7 @@ curl -sk -b cookies -H "Origin: https://vms.localhost" -H "Content-Type: applica
 設計は `docs/design.md` の「ディスク逼迫時の処理」。取り込みが有効なときだけ動く。
 
 - 使用率は `df` の Use% と同じ `(blocks - bfree) / (blocks - bfree + bavail)`（root 用の予約ブロックは分母に入れない）
-- HIGH 以上になったら、LOW を下回るまで、(1) アップロード済みのローカルのコピー（猶予中でも。消す前に照合する）、(2) 未アップロードのセグメント、の順に古いものから消す。(2) は 1 ファイルごとに `events` の `disk_pressure`（`action: segment_discarded`）に残る
+- HIGH 以上になったら、LOW を下回るまで、(1) アップロード済みのローカルのコピー（猶予中でも。消す前に照合する。Garage に届かないときはアップロード時の記録で照合する）、(2) 未アップロードのセグメント、の順に古いものから消す。(2) は 1 ファイルごとに `events` の `disk_pressure`（`action: segment_discarded`）に残る
 - path ごとの最新のファイル、`pending_uploads` に行のないファイル、ワーカーが処理中の行には触らない。失敗はログに出して次の確認でやり直す（録画は止めない）
 
 ## 保持期間

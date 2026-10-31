@@ -192,7 +192,8 @@ func TestDiskDropsUploadedFirstEvenWithinGrace(t *testing.T) {
 		t.Error("scan did not queue the complete segments only")
 	}
 	ev := h.q.diskEvents()
-	if len(ev) != 1 || ev[0].payload["action"] != diskActionRelieved || ev[0].payload["removed_uploaded"] != 1 {
+	if len(ev) != 2 || ev[0].payload["verified"] != verifiedByHead ||
+		ev[1].payload["action"] != diskActionRelieved || ev[1].payload["removed_uploaded"] != 1 {
 		t.Fatalf("events = %+v", ev)
 	}
 }
@@ -252,42 +253,123 @@ func TestDiskSkipsRowsAWorkerHolds(t *testing.T) {
 	}
 }
 
-func TestDiskUploadedButChangedOrUnverifiable(t *testing.T) {
+func TestDiskHeadMissingIsRequeued(t *testing.T) {
 	h, _ := newDiskHarness(t)
-	s0, s1, s2 := h.diskSeg(t, 0), h.diskSeg(t, 1), h.diskSeg(t, 2)
+	s0, s1 := h.diskSeg(t, 0), h.diskSeg(t, 1)
+	h.diskSeg(t, 2)
 	h.diskSeg(t, 3)
 	for _, p := range []string{s0, s1} {
 		_, _ = h.q.Enqueue(t.Context(), p)
 		h.clk.Advance(time.Millisecond)
 		h.step(t)
 	}
-	// s0's object vanished from Garage: upload again, do not delete.
+	// s0's object vanished from Garage (a definitive answer): upload again,
+	// do not delete, even though the upload record is still there.
 	delete(h.store.objects, VideoKey(testCam, time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)))
 	res := h.relieve(t)
-	// s0 requeued, s1 deleted (verified): 80%.
-	if res.RemovedUploaded != 1 || res.After != 80 || !exists(s0) || exists(s1) {
+	// s0 requeued, s1 deleted (verified by HEAD): 80%.
+	if res.RemovedUploaded != 1 || res.Discarded != 0 || res.After != 80 || !exists(s0) || exists(s1) {
 		t.Fatalf("result = %+v", res)
 	}
 	if r := h.q.rowFor(s0); r == nil || r.UploadedAt != nil || !r.NextAttemptAt.Equal(h.clk.Now()) {
 		t.Fatalf("s0 not requeued: %+v", r)
 	}
+	ev := h.q.diskEvents()
+	if len(ev) != 2 || ev[0].payload["action"] != diskActionUploadedRemoved || ev[0].payload["verified"] != verifiedByHead ||
+		ev[0].payload["local_path"] != s1 || ev[0].camera == nil {
+		t.Fatalf("events = %+v", ev)
+	}
 
-	// Upload s0 again, fill the disk to 90%, and make Garage unreachable:
-	// s0 is kept with its original schedule, and the queued s2 goes instead.
-	h.step(t)
+	// A different size in Garage is definitive too.
+	h.step(t) // uploads s0 again
+	h.store.objects[VideoKey(testCam, time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC))] = []byte("short")
 	writeSized(t, filepath.Join(h.root, "other"), 100)
-	before := *h.q.rowFor(s0)
-	if before.UploadedAt == nil {
-		t.Fatal("s0 not uploaded again")
+	h.relieve(t)
+	if !exists(s0) {
+		t.Fatal("deleted although Garage has a different size")
 	}
+	if r := h.q.rowFor(s0); r == nil || r.UploadedAt != nil {
+		t.Fatalf("s0 not requeued after a size mismatch: %+v", r)
+	}
+}
+
+// TestDiskHeadErrorUsesUploadRecord: when Garage cannot be asked, the
+// uploaded copy still goes (upload record) before any segment that has no
+// other copy.
+func TestDiskHeadErrorUsesUploadRecord(t *testing.T) {
+	h, _ := newDiskHarness(t)
+	s0, s1 := h.diskSeg(t, 0), h.diskSeg(t, 1)
+	h.diskSeg(t, 2)
+	h.diskSeg(t, 3)
+	_, _ = h.q.Enqueue(t.Context(), s1)
+	h.step(t) // s1 uploaded; s0 (older) is not
 	h.store.headErr = errors.New("connection refused")
-	res = h.relieve(t)
-	if res.RemovedUploaded != 0 || res.Discarded != 1 || !exists(s0) || exists(s2) {
-		t.Fatalf("result with head error = %+v", res)
+	res := h.relieve(t)
+	if res.RemovedUploaded != 1 || res.Discarded != 0 || res.After != 80 || exists(s1) || !exists(s0) {
+		t.Fatalf("result = %+v", res)
 	}
-	after := h.q.rowFor(s0)
-	if !after.NextAttemptAt.Equal(before.NextAttemptAt) || after.LeasedUntil != nil || h.q.restored == 0 {
-		t.Fatalf("schedule not restored: before %+v after %+v", before, after)
+	ev := h.q.diskEvents()
+	if len(ev) != 2 || ev[0].payload["action"] != diskActionUploadedRemoved || ev[0].payload["verified"] != verifiedByUploadRecord ||
+		ev[0].payload["object_key"] != VideoKey(testCam, time.Date(2026, 1, 2, 3, 1, 0, 0, time.UTC)) {
+		t.Fatalf("events = %+v", ev)
+	}
+}
+
+func TestDiskHeadErrorWithoutUploadRecordKeepsCopy(t *testing.T) {
+	for name, breakRecord := range map[string]func(h *harness, key string){
+		"no recording":   func(h *harness, key string) { delete(h.q.recs, key) },
+		"different size": func(h *harness, key string) { r := h.q.recs[key]; r.SizeBytes++; h.q.recs[key] = r },
+		"lookup fails":   func(h *harness, _ string) { h.q.recSizeErr = errors.New("db down") },
+		"file changed": func(h *harness, _ string) {
+			p := filepath.Join(h.root, testDirName, "2026-01-02_03-01-00-000000.mp4")
+			writeSized(h.t, p, diskSegSize+1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, d := newDiskHarness(t)
+			h.t = t
+			s0, s1 := h.diskSeg(t, 0), h.diskSeg(t, 1)
+			h.diskSeg(t, 2)
+			h.diskSeg(t, 3)
+			_, _ = h.q.Enqueue(t.Context(), s1)
+			h.step(t)
+			before := *h.q.rowFor(s1)
+			breakRecord(h, VideoKey(testCam, time.Date(2026, 1, 2, 3, 1, 0, 0, time.UTC)))
+			if name == "file changed" {
+				d.base-- // keep 90% with the extra byte
+			}
+			h.store.headErr = errors.New("connection refused")
+			res := h.relieve(t)
+			if res.RemovedUploaded != 0 || !exists(s1) {
+				t.Fatalf("result = %+v", res)
+			}
+			// The un-uploaded s0 goes instead.
+			if res.Discarded != 1 || exists(s0) {
+				t.Fatalf("result = %+v, s0 %v", res, exists(s0))
+			}
+			after := h.q.rowFor(s1)
+			if name == "file changed" {
+				if after.UploadedAt != nil {
+					t.Fatalf("changed file not requeued: %+v", after)
+				}
+				return
+			}
+			if !after.NextAttemptAt.Equal(before.NextAttemptAt) || after.LeasedUntil != nil {
+				t.Fatalf("schedule not restored: before %+v after %+v", before, after)
+			}
+		})
+	}
+}
+
+// TestRemoveLocalStillNeedsHead: outside of disk pressure, a HEAD error
+// keeps the file even when the upload record matches.
+func TestRemoveLocalStillNeedsHead(t *testing.T) {
+	h := newHarness(t)
+	p, _ := uploadAndPassGrace(t, h)
+	h.store.headErr = errors.New("connection refused")
+	h.step(t)
+	if !exists(p) || h.q.only(t).UploadedAt == nil {
+		t.Fatal("deleted without a successful HEAD")
 	}
 }
 

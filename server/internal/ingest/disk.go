@@ -25,7 +25,14 @@ import (
 //  1. Uploaded rows, oldest first, even within the delete grace period:
 //     the grace is a safety margin, and when the disk is full the copies
 //     that are already in Garage are the right thing to drop first. The
-//     file is checked exactly like after the grace period (checkUploaded).
+//     file is checked like after the grace period (checkUploaded), with
+//     one difference: when only the HEAD request fails (Garage is
+//     unreachable), the upload-time record is accepted instead (the local
+//     file still matches uploaded_size / uploaded_mtime and the recordings
+//     row has the same object key and size). A definitive "missing" or
+//     "different size" from Garage still means upload again. Each deleted
+//     copy is recorded as a disk_pressure event (uploaded_copy_removed,
+//     verified: head or upload_record).
 //  2. Rows not uploaded yet, oldest first. Each discarded file is recorded
 //     as a disk_pressure event (action segment_discarded).
 //
@@ -44,7 +51,14 @@ import (
 const (
 	EventDiskPressure = "disk_pressure"
 
-	diskActionDiscarded  = "segment_discarded"
+	diskActionDiscarded       = "segment_discarded"
+	diskActionUploadedRemoved = "uploaded_copy_removed"
+
+	// How an uploaded copy was verified before deletion.
+	verifiedByHead         = "head"
+	verifiedByUploadRecord = "upload_record"
+
+	// Summary actions of a run.
 	diskActionRelieved   = "relieved"
 	diskActionUnresolved = "unresolved"
 )
@@ -216,7 +230,21 @@ func (s *Service) dropUploaded(ctx context.Context, log *slog.Logger, row sqlc.P
 		s.restore(ctx, log, row, prev)
 		return 0, false
 	}
+	verified := verifiedByHead
 	reupload, err := s.checkUploaded(ctx, row, seg)
+	if errors.Is(err, errStorageUnavailable) {
+		// The file matches the upload but Garage cannot be asked. Under
+		// pressure, keeping copies that were stored and registered while
+		// discarding the only copy of segments not uploaded yet would be
+		// worse, so accept the upload-time record instead.
+		if ok, rerr := s.uploadRecordMatches(ctx, row, seg); rerr != nil {
+			err = errors.Join(err, rerr)
+		} else if ok {
+			log.Warn("storage cannot be asked; deleting the uploaded copy on the strength of the upload record",
+				slog.String("error", err.Error()))
+			err, verified = nil, verifiedByUploadRecord
+		}
+	}
 	switch {
 	case err != nil:
 		// Keep the file and its schedule; the regular flow retries.
@@ -235,8 +263,41 @@ func (s *Service) dropUploaded(ctx context.Context, log *slog.Logger, row sqlc.P
 	}
 	s.deleteRow(ctx, log, row)
 	log.Info("deleted the local copy of an uploaded segment because the disk is full",
-		slog.Int64("size_bytes", size))
+		slog.Int64("size_bytes", size), slog.String("verified", verified))
+	s.event(ctx, log, EventDiskPressure, s.knownCamera(ctx, seg), map[string]any{
+		"action":     diskActionUploadedRemoved,
+		"verified":   verified,
+		"camera_id":  seg.CameraID.String(),
+		"local_path": row.LocalPath,
+		"object_key": VideoKey(seg.CameraID, seg.StartedAt),
+		"size_bytes": size,
+		"started_at": seg.StartedAt.Format(time.RFC3339Nano),
+	})
 	return size, true
+}
+
+// uploadRecordMatches reports whether the catalog still has the recording
+// registered at upload time with the uploaded size. checkUploaded has
+// already compared the local file with uploaded_size / uploaded_mtime.
+func (s *Service) uploadRecordMatches(ctx context.Context, row sqlc.PendingUpload, seg Segment) (bool, error) {
+	if row.UploadedAt == nil || row.UploadedSize == nil || row.UploadedMtime == nil {
+		return false, nil
+	}
+	size, ok, err := s.o.Queue.RecordingSize(ctx, VideoKey(seg.CameraID, seg.StartedAt))
+	if err != nil {
+		return false, fmt.Errorf("look up recording: %w", err)
+	}
+	return ok && size == *row.UploadedSize, nil
+}
+
+// knownCamera returns the segment's camera ID if the camera exists
+// (events.camera_id references cameras), else nil.
+func (s *Service) knownCamera(ctx context.Context, seg Segment) *uuid.UUID {
+	if ok, err := s.o.Queue.CameraExists(ctx, seg.CameraID); err == nil && ok {
+		id := seg.CameraID
+		return &id
+	}
+	return nil
 }
 
 // discard deletes a segment that was not uploaded and records an event.
@@ -268,14 +329,8 @@ func (s *Service) discard(ctx context.Context, log *slog.Logger, row sqlc.Pendin
 	log.Warn("discarded a segment that was not uploaded because the disk is full",
 		slog.Int64("size_bytes", size), slog.Time("started_at", seg.StartedAt))
 
-	// events.camera_id references cameras; a deleted camera's id goes only
-	// into the payload.
-	var camID *uuid.UUID
-	if ok, err := s.o.Queue.CameraExists(ctx, seg.CameraID); err == nil && ok {
-		id := seg.CameraID
-		camID = &id
-	}
-	s.event(ctx, log, EventDiskPressure, camID, map[string]any{
+	// A deleted camera's id goes only into the payload.
+	s.event(ctx, log, EventDiskPressure, s.knownCamera(ctx, seg), map[string]any{
 		"action":     diskActionDiscarded,
 		"camera_id":  seg.CameraID.String(),
 		"local_path": row.LocalPath,

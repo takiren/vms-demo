@@ -479,6 +479,11 @@ func (s *Service) verifyUploaded(ctx context.Context, log *slog.Logger, row sqlc
 	return true
 }
 
+// errStorageUnavailable marks a checkUploaded error where only the HEAD
+// request failed (network, 5xx, timeout): the local file did match the
+// upload, but Garage could not confirm the object.
+var errStorageUnavailable = errors.New("storage unavailable")
+
 // checkUploaded compares the local file with what was uploaded: it must be
 // the same file (size and mtime) and Garage must have an object of that
 // size. It returns "" and nil when the file may be deleted, a reason when
@@ -506,7 +511,7 @@ func (s *Service) checkUploaded(ctx context.Context, row sqlc.PendingUpload, seg
 	size, exists, err := s.o.Store.Head(hctx, key)
 	switch {
 	case err != nil:
-		return "", fmt.Errorf("check object: %w", err)
+		return "", fmt.Errorf("check object: %w: %w", errStorageUnavailable, err)
 	case !exists:
 		return "object is missing in storage", nil
 	case size != fi.Size():
