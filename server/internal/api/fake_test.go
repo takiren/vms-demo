@@ -131,6 +131,7 @@ func newServerWithFake(t *testing.T) (*echo.Echo, *bytes.Buffer, *fakeAuth) {
 		Auth:           f,
 		PublicOrigin:   testOrigin,
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")},
+		HookToken:      testHookToken,
 	})
 	if err != nil {
 		t.Fatalf("api.New: %v", err)

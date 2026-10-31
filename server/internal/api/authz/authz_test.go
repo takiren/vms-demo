@@ -32,6 +32,8 @@ var expected = map[string]string{
 	"getCamera":         "admin",
 	"updateCamera":      "admin",
 	"deleteCamera":      "admin",
+
+	"mediamtxSegmentComplete": "hookToken",
 }
 
 func TestEverySpecOperationHasADecidedPolicy(t *testing.T) {
@@ -52,6 +54,9 @@ func TestEverySpecOperationHasADecidedPolicy(t *testing.T) {
 		got := string(p.MinRole)
 		if p.Public {
 			got = "public"
+		}
+		if p.HookToken {
+			got = "hookToken"
 		}
 		want, ok := expectedByName[authz.StrictName(p.OperationID)]
 		if !ok {
@@ -100,6 +105,9 @@ func TestCheck(t *testing.T) {
 		{authz.Policy{MinRole: auth.RoleAdmin}, nil, authz.ErrUnauthenticated},
 		{authz.Policy{MinRole: auth.RoleViewer}, odd, authz.ErrForbidden},
 		{authz.Policy{}, admin, authz.ErrForbidden}, // zero policy denies
+		// Sessions never satisfy the hook token scheme.
+		{authz.Policy{HookToken: true}, admin, authz.ErrUnauthenticated},
+		{authz.Policy{HookToken: true}, nil, authz.ErrUnauthenticated},
 	}
 	for i, tt := range tests {
 		if err := tt.p.Check(tt.u); !errors.Is(err, tt.want) {
@@ -121,6 +129,7 @@ components:
   securitySchemes:
     cookieAuth: {type: apiKey, in: cookie, name: s}
     other: {type: apiKey, in: header, name: X-Key}
+    hookToken: {type: apiKey, in: header, name: X-VMS-Hook-Token}
 paths:
   /x:
     get:
@@ -129,7 +138,13 @@ paths:
 
 func build(t *testing.T, op string) error {
 	t.Helper()
-	doc, err := openapi3.NewLoader().LoadFromData([]byte(strings.Replace(specHeader, "      responses:", op+"\n      responses:", 1)))
+	return buildAt(t, "/x", op)
+}
+
+func buildAt(t *testing.T, path, op string) error {
+	t.Helper()
+	spec := strings.Replace(specHeader, "  /x:", "  "+path+":", 1)
+	doc, err := openapi3.NewLoader().LoadFromData([]byte(strings.Replace(spec, "      responses:", op+"\n      responses:", 1)))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -159,6 +174,29 @@ func TestBuildRejectsUndecidedOperations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := build(t, tt.op)
+			if (err == nil) != tt.ok {
+				t.Errorf("Build = %v, want ok=%v", err, tt.ok)
+			}
+		})
+	}
+}
+
+func TestBuildInternalOperations(t *testing.T) {
+	tests := []struct {
+		name, path, op string
+		ok             bool
+	}{
+		{"hook token under internal", "/internal/hook", "      operationId: hook\n      security: [{hookToken: []}]", true},
+		{"hook token outside internal", "/hook", "      operationId: hook\n      security: [{hookToken: []}]", false},
+		{"hook token with role", "/internal/hook", "      operationId: hook\n      security: [{hookToken: []}]\n      x-min-role: admin", false},
+		{"hook token with scopes", "/internal/hook", "      operationId: hook\n      security: [{hookToken: [a]}]", false},
+		{"hook token or cookie", "/internal/hook", "      operationId: hook\n      security: [{hookToken: []}, {cookieAuth: []}]", false},
+		{"cookie under internal", "/internal/hook", "      operationId: hook\n      x-min-role: admin", false},
+		{"public under internal", "/internal/hook", "      operationId: hook\n      security: []", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := buildAt(t, tt.path, tt.op)
 			if (err == nil) != tt.ok {
 				t.Errorf("Build = %v, want ok=%v", err, tt.ok)
 			}

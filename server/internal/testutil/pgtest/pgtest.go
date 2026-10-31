@@ -32,9 +32,15 @@ var adminURL string
 
 // Main runs the tests of a package, with a PostgreSQL container unless -short.
 func Main(m *testing.M) {
+	os.Exit(Run(m))
+}
+
+// Run is Main without exiting, for TestMain functions that also start other
+// containers. It returns the exit code.
+func Run(m *testing.M) int {
 	flag.Parse()
 	if testing.Short() {
-		os.Exit(m.Run())
+		return m.Run()
 	}
 	ctx := context.Background()
 	ctr, err := postgres.Run(ctx, Image,
@@ -54,7 +60,7 @@ func Main(m *testing.M) {
 	if err := testcontainers.TerminateContainer(ctr); err != nil {
 		log.Printf("terminate container: %v", err)
 	}
-	os.Exit(code)
+	return code
 }
 
 var seq atomic.Int64

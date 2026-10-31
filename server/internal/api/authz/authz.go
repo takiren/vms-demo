@@ -10,8 +10,11 @@
 //   - `security: []` makes an operation public. It must not have x-min-role.
 //   - `security: [cookieAuth: []]` requires a session and an explicit
 //     `x-min-role` of admin or viewer (viewer = any logged-in user).
-//   - Any other security requirement is rejected until it is implemented
-//     (for example the MediaMTX callbacks under /internal/).
+//   - `security: [hookToken: []]` (the MediaMTX hook's shared secret) is
+//     only allowed under /internal/ and must not have x-min-role. Sessions
+//     never satisfy it.
+//   - Operations under /internal/ (no CSRF check) must not use cookieAuth.
+//   - Any other security requirement is rejected until it is implemented.
 //
 // Operations missing from the table are denied.
 package authz
@@ -31,6 +34,14 @@ import (
 // SchemeCookie is the security scheme name for the session cookie.
 const SchemeCookie = "cookieAuth"
 
+// SchemeHookToken is the security scheme name for the MediaMTX hook's
+// shared secret (X-VMS-Hook-Token).
+const SchemeHookToken = "hookToken"
+
+// InternalPrefix is the path prefix (relative to the base path) of
+// server-to-server operations.
+const InternalPrefix = "/internal/"
+
 // ExtMinRole is the operation extension naming the minimum role.
 const ExtMinRole = "x-min-role"
 
@@ -41,8 +52,12 @@ type Policy struct {
 	OperationID string
 	// Public operations need no session.
 	Public bool
-	// MinRole is the least role allowed (for non-public operations).
+	// MinRole is the least role allowed (for cookie-authenticated operations).
 	MinRole auth.Role
+	// HookToken operations are authenticated by the MediaMTX hook token,
+	// never by a session. The middleware checks the token; Check always
+	// fails for them.
+	HookToken bool
 }
 
 // Errors returned by Check.
@@ -57,7 +72,7 @@ func (p Policy) Check(u *auth.User) error {
 	if p.Public {
 		return nil
 	}
-	if u == nil {
+	if p.HookToken || u == nil {
 		return ErrUnauthenticated
 	}
 	if !u.Role.Satisfies(p.MinRole) {
@@ -84,7 +99,7 @@ func Build(doc *openapi3.T, basePath string) (*Table, error) {
 	var errs []error
 	for path, item := range doc.Paths.Map() {
 		for method, op := range item.Operations() {
-			p, err := policyFor(doc, op)
+			p, err := policyFor(doc, path, op)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("%s %s: %w", method, path, err))
 				continue
@@ -100,7 +115,7 @@ func Build(doc *openapi3.T, basePath string) (*Table, error) {
 	return t, nil
 }
 
-func policyFor(doc *openapi3.T, op *openapi3.Operation) (Policy, error) {
+func policyFor(doc *openapi3.T, path string, op *openapi3.Operation) (Policy, error) {
 	if !operationIDPattern.MatchString(op.OperationID) {
 		return Policy{}, fmt.Errorf("operationId %q must be camelCase letters and digits", op.OperationID)
 	}
@@ -120,9 +135,26 @@ func policyFor(doc *openapi3.T, op *openapi3.Operation) (Policy, error) {
 		p.Public = true
 		return p, nil
 	case len(security) == 1 && len(security[0]) == 1:
+		internal := strings.HasPrefix(path, InternalPrefix)
+		if scopes, ok := security[0][SchemeHookToken]; ok {
+			switch {
+			case len(scopes) != 0:
+				return Policy{}, fmt.Errorf("operation %s: %s takes no scopes", op.OperationID, SchemeHookToken)
+			case !internal:
+				return Policy{}, fmt.Errorf("operation %s: %s is only for %s operations", op.OperationID, SchemeHookToken, InternalPrefix)
+			case hasRole:
+				return Policy{}, fmt.Errorf("operation %s: %s operations must not have %s", op.OperationID, SchemeHookToken, ExtMinRole)
+			}
+			p.HookToken = true
+			return p, nil
+		}
 		scopes, ok := security[0][SchemeCookie]
 		if !ok || len(scopes) != 0 {
-			return Policy{}, fmt.Errorf("operation %s: only %s without scopes is supported", op.OperationID, SchemeCookie)
+			return Policy{}, fmt.Errorf("operation %s: only %s or %s without scopes is supported", op.OperationID, SchemeCookie, SchemeHookToken)
+		}
+		if internal {
+			// /internal/ skips the CSRF check, so a session must not work there.
+			return Policy{}, fmt.Errorf("operation %s: %s operations must not use %s", op.OperationID, InternalPrefix, SchemeCookie)
 		}
 	default:
 		return Policy{}, fmt.Errorf("operation %s: unsupported security requirement", op.OperationID)
