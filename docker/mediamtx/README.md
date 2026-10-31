@@ -52,7 +52,7 @@ docker run --rm \
 | ボリューム | `recordings` を MediaMTX の `/recordings`（rw）と API の同じパス（読み取りと削除）で共有する |
 | ポート（公開しない） | `9997` Control API、`8888` HLS、`8889` WebRTC（HTTP）。Caddy と API からだけ到達できるようにする |
 | ポート（公開する） | `8189/udp` と `8189/tcp`（WebRTC のメディア）。Caddy は通さない |
-| 環境変数 | `VMS_HOOK_TOKEN`（必須。空だと通知しない）。`MTX_AUTHHTTPADDRESS`、`VMS_HOOK_URL`、`MTX_WEBRTCADDITIONALHOSTS` |
+| 環境変数 | `VMS_HOOK_TOKEN`（必須。空だと通知しない）。`MTX_AUTHHTTPADDRESS`（userinfo に `VMS_MEDIAMTX_AUTH_SECRET` を入れる）、`VMS_HOOK_URL`、`MTX_WEBRTCADDITIONALHOSTS` |
 | host.docker.internal | API をホストで動かす開発構成では `extra_hosts: ["host.docker.internal:host-gateway"]` が要る |
 | 開発でホストの API が Control API を呼ぶとき | `127.0.0.1:9997:9997` にだけ公開する |
 
@@ -62,7 +62,7 @@ MediaMTX は、設定のキーを `MTX_` + 大文字にした環境変数で上�
 
 | 変数 | 既定（yml） | 用途 |
 |---|---|---|
-| `MTX_AUTHHTTPADDRESS` | `http://host.docker.internal:8080/api/internal/mediamtx/auth` | 認証の問い合わせ先（全部コンテナなら `http://api:8080/...`） |
+| `MTX_AUTHHTTPADDRESS` | `http://host.docker.internal:8080/api/internal/mediamtx/auth` | 認証の問い合わせ先。compose は `http://mediamtx:<VMS_MEDIAMTX_AUTH_SECRET>@host.docker.internal:8080/...` にする（全部コンテナなら `api:8080`）。userinfo がないと API はすべて拒否する |
 | `MTX_WEBRTCADDITIONALHOSTS` | なし | ブラウザに伝える ICE candidate のホスト（公開 IP / ホスト名） |
 | `MTX_LOGLEVEL` | `info` | ログレベル |
 | `VMS_HOOK_URL` | `http://host.docker.internal:8080/api/internal/mediamtx/segment-complete` | セグメント完了の通知先（スクリプトが読む） |
@@ -78,7 +78,8 @@ MediaMTX は、設定のキーを `MTX_` + 大文字にした環境変数で上�
 ### 認証（authMethod: http）
 
 MediaMTX は、全部の操作で `authHTTPAddress` に POST する。200 番台なら許可、それ以外は拒否。
-API の判定エンドポイント（#10）は `POST /api/internal/mediamtx/auth` で、本文は次の JSON。
+API の判定エンドポイントは `POST /api/internal/mediamtx/auth`（`server/internal/liveauth`）で、本文は次の JSON。
+判定の表は `docs/design.md` の「MediaMTX からの問い合わせ」。
 
 ```json
 {
@@ -105,7 +106,16 @@ API の判定エンドポイント（#10）は `POST /api/internal/mediamtx/auth
     {"ip":"172.18.0.1","user":"vms-api","password":"<VMS_MEDIAMTX_API_PASSWORD>","token":"<VMS_MEDIAMTX_API_PASSWORD>","action":"api","path":"","protocol":"","id":null,"query":"","userAgent":""}
     ```
   - Control API のポート（9997）は外に公開しないので、二重の防御になる
-- `action: read` は、ブラウザのセッション Cookie では判定できない（MediaMTX の問い合わせにはブラウザの Cookie が含まれない）。API がライブ用の短命なトークンを発行し、`query`（`?token=...`）または `token` で受け取る方式を #10 で決める
+- エンドポイント自体も認証する。MediaMTX は `authHTTPAddress` の userinfo（`http://mediamtx:<VMS_MEDIAMTX_AUTH_SECRET>@...`）を Basic 認証として送る。違えば 401。Go の HTTP クライアントは、エラーのメッセージでは userinfo のパスワードを伏せる（クエリに入れると伏せられないので入れない）
+  - `logLevel: debug` にすると、MediaMTX は問い合わせの本文（パスワード、トークン）をログに出す。本番では debug にしない
+- `action: publish` は拒否する。カメラもテスト映像も、MediaMTX が RTSP のクライアントとして取りに行く（pull）ので、publish するものはない
+- `action: read` は、ブラウザのセッション Cookie では判定できない（MediaMTX の問い合わせにはブラウザの Cookie が含まれない）。API が発行するライブ用の短命なトークン（`POST /api/live/token`、5 分）で判定する
+  - ブラウザは `Authorization: Bearer <token>`（`reader.js` の `token`、hls.js の `xhrSetup`）か、HLS の `index.m3u8?token=<token>` で送る。MediaMTX は Bearer を `token` に、クエリを `query` に入れて問い合わせる（`authMethod: http` では `?token=` を `token` に移さない）
+  - Basic 認証（`user` / `password`）では読めない。Basic のパスワードは `token` にも入るので、Control API のパスワードをトークンとして使うこともできない
+  - MediaMTX が問い合わせるのは接続のときだけ（WebRTC は WHEP の `OPTIONS` と `POST`、HLS は最初の `index.m3u8` でセッションを作るとき）。許可の応答の `{"expireAt": ...}`（セッションの期限か 1 時間後の早いほう）で、MediaMTX は配信を切る。クライアントは新しいトークンで再接続する
+  - 何も送らないと MediaMTX は `WWW-Authenticate: Basic` 付きの 401 を返す（ブラウザが認証ダイアログを出すことがある）。クライアントは必ずトークンを送る
+  - Control API に追加されていない path は、問い合わせる前に MediaMTX が拒否する
+  - #16（ライブ画面）向けの約束は `docs/design.md` の「ライブ用トークン」
 - 判定エンドポイントが落ちている、または到達できないときは、MediaMTX は拒否する（ライブは見えなくなるが、録画は続く）
 
 ### セグメント完了の通知

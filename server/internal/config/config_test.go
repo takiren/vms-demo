@@ -19,6 +19,8 @@ const (
 
 const testMediaMTXPassword = "mediamtx-api-secret-0123456789"
 
+const testMediaMTXAuthSecret = "mediamtx-auth-secret-0123456789"
+
 var testKey = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
 
 func env(overrides map[string]string) func(string) (string, bool) {
@@ -27,6 +29,7 @@ func env(overrides map[string]string) func(string) (string, bool) {
 		config.EnvSecretKey:           testKey,
 		config.EnvHost:                "vms.example",
 		config.EnvMediaMTXAPIPassword: testMediaMTXPassword,
+		config.EnvMediaMTXAuthSecret:  testMediaMTXAuthSecret,
 	}
 	for k, v := range overrides {
 		if v == "<unset>" {
@@ -299,8 +302,11 @@ func TestLoadMediaMTX(t *testing.T) {
 
 	var buf bytes.Buffer
 	slog.New(slog.NewJSONHandler(&buf, nil)).Info("cfg", slog.Any("config", cfg))
-	if strings.Contains(buf.String(), testMediaMTXPassword) {
-		t.Errorf("log leaks the MediaMTX password: %s", buf.String())
+	if strings.Contains(buf.String(), testMediaMTXPassword) || strings.Contains(buf.String(), testMediaMTXAuthSecret) {
+		t.Errorf("log leaks a MediaMTX secret: %s", buf.String())
+	}
+	if cfg.MediaMTXAuthSecret.Value() != testMediaMTXAuthSecret {
+		t.Error("MediaMTXAuthSecret not loaded")
 	}
 
 	tests := []struct {
@@ -316,6 +322,11 @@ func TestLoadMediaMTX(t *testing.T) {
 		{map[string]string{config.EnvMediaMTXAPIURL: "http://mediamtx:9997/v3"}, "VMS_MEDIAMTX_API_URL: must be"},
 		{map[string]string{config.EnvMediaMTXAPIUser: "a b"}, "VMS_MEDIAMTX_API_USER: must be"},
 		{map[string]string{config.EnvMediaMTXSyncInterval: "1s"}, "VMS_MEDIAMTX_SYNC_INTERVAL: must be between"},
+		{map[string]string{config.EnvMediaMTXAuthSecret: "<unset>"}, "VMS_MEDIAMTX_AUTH_SECRET: is required"},
+		{map[string]string{config.EnvMediaMTXAuthSecret: "CHANGE_ME"}, "VMS_MEDIAMTX_AUTH_SECRET: is still the CHANGE_ME"},
+		{map[string]string{config.EnvMediaMTXAuthSecret: "0123456789abcde"}, "VMS_MEDIAMTX_AUTH_SECRET: must be 16-256"},
+		{map[string]string{config.EnvMediaMTXAuthSecret: "0123456789abcdef@host"}, "VMS_MEDIAMTX_AUTH_SECRET: must be 16-256"},
+		{map[string]string{config.EnvMediaMTXAuthSecret: "0123456789abcdef:x"}, "VMS_MEDIAMTX_AUTH_SECRET: must be 16-256"},
 	}
 	for _, tt := range tests {
 		_, err := config.Load(env(tt.env))

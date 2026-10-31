@@ -297,6 +297,21 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 	return Principal{User: toUser(row.User), SessionID: row.Session.ID}, nil
 }
 
+// SessionByID returns the principal of a live session and when it expires,
+// without extending it. It returns ErrUnauthenticated if the session does
+// not exist (logged out, revoked by a password or role change, user
+// deleted) or has expired. Live tokens are checked against it.
+func (s *Service) SessionByID(ctx context.Context, id uuid.UUID) (Principal, time.Time, error) {
+	row, err := s.q.GetSessionByID(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Principal{}, time.Time{}, ErrUnauthenticated
+	}
+	if err != nil {
+		return Principal{}, time.Time{}, fmt.Errorf("auth: get session: %w", err)
+	}
+	return Principal{User: toUser(row.User), SessionID: row.Session.ID}, row.Session.ExpiresAt, nil
+}
+
 // Logout deletes a session.
 func (s *Service) Logout(ctx context.Context, sessionID uuid.UUID) error {
 	if _, err := s.q.DeleteSession(ctx, sessionID); err != nil {

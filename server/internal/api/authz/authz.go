@@ -10,11 +10,14 @@
 //   - `security: []` makes an operation public. It must not have x-min-role.
 //   - `security: [cookieAuth: []]` requires a session and an explicit
 //     `x-min-role` of admin or viewer (viewer = any logged-in user).
-//   - `security: [hookToken: []]` (the MediaMTX hook's shared secret) is
-//     only allowed under /internal/ and must not have x-min-role. Sessions
-//     never satisfy it.
-//   - Operations under /internal/ (no CSRF check) must not use cookieAuth.
-//   - Any other security requirement is rejected until it is implemented.
+//   - Internal schemes (InternalSchemes: `mediamtxAuth` for the MediaMTX
+//     auth callback, `hookToken` for the segment-complete hook) are for server-to-server operations: only
+//     operations under /internal/ may use them, with no scopes and without
+//     x-min-role. Sessions never satisfy them; the middleware checks the
+//     scheme's own credentials.
+//   - Every operation under /internal/ (no CSRF check) must use exactly one
+//     internal scheme: never cookieAuth, never public.
+//   - Any other security requirement is rejected.
 //
 // Operations missing from the table are denied.
 package authz
@@ -38,7 +41,20 @@ const SchemeCookie = "cookieAuth"
 // shared secret (X-VMS-Hook-Token).
 const SchemeHookToken = "hookToken"
 
-// InternalPrefix is the path prefix (relative to the base path) of
+// SchemeMediaMTX is the security scheme of the MediaMTX auth callback
+// (Basic auth with VMS_MEDIAMTX_AUTH_SECRET).
+const SchemeMediaMTX = "mediamtxAuth"
+
+// InternalSchemes are the server-to-server security schemes. Only
+// operations under InternalPrefix may use them, and those operations must
+// use exactly one of them. Add a scheme here (and its check in the
+// middleware) to allow it.
+var InternalSchemes = map[string]bool{
+	SchemeMediaMTX:  true,
+	SchemeHookToken: true,
+}
+
+// InternalPrefix is the path prefix (relative to the base path) of the
 // server-to-server operations.
 const InternalPrefix = "/internal/"
 
@@ -52,13 +68,19 @@ type Policy struct {
 	OperationID string
 	// Public operations need no session.
 	Public bool
-	// MinRole is the least role allowed (for cookie-authenticated operations).
+	// MinRole is the least role allowed (for cookie operations).
 	MinRole auth.Role
-	// HookToken operations are authenticated by the MediaMTX hook token,
-	// never by a session. The middleware checks the token; Check always
-	// fails for them.
-	HookToken bool
+	// Scheme is the security scheme (SchemeCookie or one of
+	// InternalSchemes); empty for public operations.
+	Scheme string
 }
+
+// Internal reports whether the operation uses an internal scheme. Sessions
+// never satisfy it: the middleware checks the scheme's credentials instead.
+func (p Policy) Internal() bool { return InternalSchemes[p.Scheme] }
+
+// MediaMTX reports whether the operation is the MediaMTX auth callback.
+func (p Policy) MediaMTX() bool { return p.Scheme == SchemeMediaMTX }
 
 // Errors returned by Check.
 var (
@@ -72,7 +94,7 @@ func (p Policy) Check(u *auth.User) error {
 	if p.Public {
 		return nil
 	}
-	if p.HookToken || u == nil {
+	if p.Internal() || u == nil {
 		return ErrUnauthenticated
 	}
 	if !u.Role.Satisfies(p.MinRole) {
@@ -126,31 +148,34 @@ func policyFor(doc *openapi3.T, path string, op *openapi3.Operation) (Policy, er
 		security = *op.Security
 	}
 	rawRole, hasRole := op.Extensions[ExtMinRole]
+	internal := strings.HasPrefix(path, InternalPrefix)
 
 	switch {
 	case len(security) == 0:
+		if internal {
+			return Policy{}, fmt.Errorf("operation %s: %s operations must use an internal scheme, not be public", op.OperationID, InternalPrefix)
+		}
 		if hasRole {
 			return Policy{}, fmt.Errorf("public operation %s must not have %s", op.OperationID, ExtMinRole)
 		}
 		p.Public = true
 		return p, nil
 	case len(security) == 1 && len(security[0]) == 1:
-		internal := strings.HasPrefix(path, InternalPrefix)
-		if scopes, ok := security[0][SchemeHookToken]; ok {
+		scheme, scopes := onlyScheme(security[0])
+		if InternalSchemes[scheme] {
 			switch {
 			case len(scopes) != 0:
-				return Policy{}, fmt.Errorf("operation %s: %s takes no scopes", op.OperationID, SchemeHookToken)
+				return Policy{}, fmt.Errorf("operation %s: %s takes no scopes", op.OperationID, scheme)
 			case !internal:
-				return Policy{}, fmt.Errorf("operation %s: %s is only for %s operations", op.OperationID, SchemeHookToken, InternalPrefix)
+				return Policy{}, fmt.Errorf("operation %s: %s is only for %s operations", op.OperationID, scheme, InternalPrefix)
 			case hasRole:
-				return Policy{}, fmt.Errorf("operation %s: %s operations must not have %s", op.OperationID, SchemeHookToken, ExtMinRole)
+				return Policy{}, fmt.Errorf("operation %s: %s operations must not have %s", op.OperationID, scheme, ExtMinRole)
 			}
-			p.HookToken = true
+			p.Scheme = scheme
 			return p, nil
 		}
-		scopes, ok := security[0][SchemeCookie]
-		if !ok || len(scopes) != 0 {
-			return Policy{}, fmt.Errorf("operation %s: only %s or %s without scopes is supported", op.OperationID, SchemeCookie, SchemeHookToken)
+		if scheme != SchemeCookie || len(scopes) != 0 {
+			return Policy{}, fmt.Errorf("operation %s: only %s or an internal scheme without scopes is supported", op.OperationID, SchemeCookie)
 		}
 		if internal {
 			// /internal/ skips the CSRF check, so a session must not work there.
@@ -165,7 +190,16 @@ func policyFor(doc *openapi3.T, path string, op *openapi3.Operation) (Policy, er
 		return Policy{}, fmt.Errorf("authenticated operation %s needs %s: admin or viewer", op.OperationID, ExtMinRole)
 	}
 	p.MinRole = auth.Role(role)
+	p.Scheme = SchemeCookie
 	return p, nil
+}
+
+// onlyScheme returns the scheme of a requirement with exactly one scheme.
+func onlyScheme(req openapi3.SecurityRequirement) (string, []string) {
+	for name, scopes := range req {
+		return name, scopes
+	}
+	return "", nil
 }
 
 // RouteKey is the lookup key for an Echo route.

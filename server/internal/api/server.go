@@ -61,6 +61,10 @@ type Options struct {
 	// Ingest receives segment-complete notifications. Nil disables the
 	// endpoint (503).
 	Ingest IngestService
+	// Live issues live tokens and answers MediaMTX's authentication
+	// requests. If nil, issueLiveToken responds 503 and every MediaMTX
+	// callback is rejected (401).
+	Live LiveAuthService
 }
 
 // Handlers implements gen.StrictServerInterface.
@@ -69,6 +73,7 @@ type Handlers struct {
 	logger  *slog.Logger
 	cameras CameraService
 	ingest  IngestService
+	live    LiveAuthService
 }
 
 var _ gen.StrictServerInterface = (*Handlers)(nil)
@@ -109,11 +114,11 @@ func New(logger *slog.Logger, opts Options) (*echo.Echo, error) {
 		middleware.BodyLimit(MaxRequestBodyBytes),
 		clientIPMiddleware(clientip.New(opts.TrustedProxies)),
 		originCheck(opts.PublicOrigin),
-		authenticate(policies, opts.Auth, newHookAuth(opts.HookToken), logger),
+		authenticate(policies, opts.Auth, newHookAuth(opts.HookToken), opts.Live, logger),
 		validator,
 	)
 
-	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest}
+	h := &Handlers{auth: opts.Auth, logger: logger, cameras: opts.Cameras, ingest: opts.Ingest, live: opts.Live}
 	strict := gen.NewStrictHandler(h, []gen.StrictMiddlewareFunc{strictAuthorize(policies)})
 	gen.RegisterHandlersWithBaseURL(e, strict, BasePath)
 

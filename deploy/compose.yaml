@@ -125,7 +125,9 @@ services:
       - ${MTX_WEBRTC_BIND:-127.0.0.1}:8189:8189/tcp
     environment:
       VMS_HOOK_TOKEN: ${VMS_HOOK_TOKEN:?set VMS_HOOK_TOKEN in .env}
-      MTX_AUTHHTTPADDRESS: ${MTX_AUTHHTTPADDRESS:-http://host.docker.internal:8080/api/internal/mediamtx/auth}
+      # 認証の問い合わせ先（ホストの API）。userinfo の Basic 認証で API に名乗る（docs/design.md の
+      # 「MediaMTX からの問い合わせ」）。クエリには入れない（MediaMTX のエラーログに URL が出るため）
+      MTX_AUTHHTTPADDRESS: http://mediamtx:${VMS_MEDIAMTX_AUTH_SECRET:?set VMS_MEDIAMTX_AUTH_SECRET in .env}@host.docker.internal:8080/api/internal/mediamtx/auth
       MTX_WEBRTCADDITIONALHOSTS: ${MTX_WEBRTCADDITIONALHOSTS:-}
     volumes:
       - ./mediamtx.yml:/etc/mediamtx/mediamtx.yml:ro
