@@ -118,6 +118,10 @@ func TestIngestEndToEnd(t *testing.T) {
 		r.ThumbnailKey == nil || *r.ThumbnailKey != ThumbnailKey(key) {
 		t.Fatalf("recording = %+v", r)
 	}
+	// ftyp (28) + moov (1191) of the test segment: the HLS init byte range (#13).
+	if r.InitSize == nil || *r.InitSize != 1219 {
+		t.Errorf("init_size = %v, want 1219", r.InitSize)
+	}
 	if d := r.EndedAt.Sub(r.StartedAt); d < 900*time.Millisecond || d > 1100*time.Millisecond {
 		t.Errorf("duration = %s, want about 1s", d)
 	}

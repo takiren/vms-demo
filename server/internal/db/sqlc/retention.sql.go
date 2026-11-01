@@ -13,7 +13,7 @@ import (
 )
 
 const listExpiredRecordingsAfter = `-- name: ListExpiredRecordingsAfter :many
-SELECT recordings.id, recordings.camera_id, recordings.started_at, recordings.ended_at, recordings.object_key, recordings.size_bytes, recordings.thumbnail_key, recordings.created_at FROM recordings
+SELECT recordings.id, recordings.camera_id, recordings.started_at, recordings.ended_at, recordings.object_key, recordings.size_bytes, recordings.thumbnail_key, recordings.created_at, recordings.init_size FROM recordings
 JOIN cameras ON cameras.id = recordings.camera_id
 WHERE recordings.ended_at < $1::timestamptz - make_interval(days => cameras.retention_days)
   AND (recordings.started_at, recordings.id) > ($2::timestamptz, $3::uuid)
@@ -54,6 +54,7 @@ func (q *Queries) ListExpiredRecordingsAfter(ctx context.Context, arg ListExpire
 			&i.SizeBytes,
 			&i.ThumbnailKey,
 			&i.CreatedAt,
+			&i.InitSize,
 		); err != nil {
 			return nil, err
 		}
