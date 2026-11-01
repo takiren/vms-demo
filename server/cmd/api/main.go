@@ -173,13 +173,24 @@ func serve() error {
 		return err
 	}
 
-	var playbackAPI api.PlaybackService
-	if pb, err := newPlayback(logger, cfg, pool, store); err != nil {
+	pb, err := newPlayback(logger, cfg, pool, store)
+	if err != nil {
 		return err
-	} else if pb != nil {
+	}
+	var playbackAPI api.PlaybackService
+	if pb != nil {
 		playbackAPI = pb
 	} else {
 		logger.Warn("recording playback is disabled (" + config.EnvS3Endpoint + " is not set)")
+	}
+	clipSvc, err := newClip(logger, cfg, pool, store, pb)
+	if err != nil {
+		return err
+	}
+	var clipAPI api.ClipService
+	if clipSvc != nil {
+		clipAPI = clipSvc
+		go clipSvc.Run(ctx)
 	}
 
 	e, err := api.New(logger, api.Options{
@@ -191,6 +202,7 @@ func serve() error {
 		Ingest:         ingestAPI,
 		Live:           live,
 		Playback:       playbackAPI,
+		Clip:           clipAPI,
 	})
 	if err != nil {
 		return err

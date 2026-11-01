@@ -7,17 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/takiren/vms-demo/server/internal/ffexec"
 )
 
-// FFmpeg runs ffprobe and ffmpeg as separate processes (never linked, never
-// through a shell: arguments are passed as a slice). Inputs are given with
-// the file: protocol prefix so a path can never be taken for an option or
-// another protocol.
+// FFmpeg runs ffprobe and ffmpeg as separate processes through ffexec
+// (never linked, never through a shell: arguments are passed as a slice).
+// Inputs are given with the file: protocol prefix so a path can never be
+// taken for an option or another protocol.
 type FFmpeg struct {
 	FFmpegPath  string
 	FFprobePath string
@@ -26,14 +26,13 @@ type FFmpeg struct {
 }
 
 // DefaultMediaTimeout bounds one ffprobe or ffmpeg run.
-const DefaultMediaTimeout = time.Minute
+const DefaultMediaTimeout = ffexec.DefaultTimeout
 
 // Output limits. A 1-minute segment has a few thousand packets (about 30
 // bytes per line); a 320 px JPEG is tens of KB.
 const (
 	maxProbeOutput     = 8 << 20
 	maxThumbnailOutput = 4 << 20
-	maxStderr          = 2 << 10
 	// ThumbnailWidth is the width of thumbnails in pixels.
 	ThumbnailWidth = 320
 )
@@ -111,72 +110,7 @@ func (f FFmpeg) Thumbnail(ctx context.Context, file string) ([]byte, error) {
 	return out, nil
 }
 
-// run executes bin with args and returns its stdout. The child gets a
-// minimal environment: the API's environment holds secrets (S3 keys, the
-// hook token) that ffmpeg has no business seeing.
+// run executes bin with args (ffexec.Run) and returns its stdout.
 func (f FFmpeg) run(ctx context.Context, bin string, maxOut int, args ...string) ([]byte, error) {
-	timeout := f.Timeout
-	if timeout <= 0 {
-		timeout = DefaultMediaTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin is from the config; args are a fixed list plus a file: URL, no shell
-	cmd.Env = childEnv()
-	cmd.Stdin = nil
-	stdout := &limitedBuffer{max: maxOut}
-	stderr := &limitedBuffer{max: maxStderr}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.WaitDelay = 5 * time.Second
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return nil, fmt.Errorf("%s: %w", bin, ctx.Err())
-	}
-	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return nil, fmt.Errorf("%w: %s", err, msg)
-		}
-		return nil, err
-	}
-	if stdout.overflow {
-		return nil, fmt.Errorf("%s: output exceeds %d bytes", bin, maxOut)
-	}
-	return stdout.Bytes(), nil
+	return ffexec.Run(ctx, bin, f.Timeout, maxOut, args...)
 }
-
-func childEnv() []string {
-	env := []string{"LC_ALL=C"}
-	for _, k := range []string{"PATH", "LD_LIBRARY_PATH", "TMPDIR"} {
-		if v, ok := os.LookupEnv(k); ok {
-			env = append(env, k+"="+v)
-		}
-	}
-	return env
-}
-
-// limitedBuffer keeps at most max bytes and remembers whether more came.
-// The buffer is a named field, not embedded: an embedded bytes.Buffer would
-// expose ReadFrom, which io.Copy (used by os/exec) prefers over Write,
-// bypassing the limit.
-type limitedBuffer struct {
-	buf      bytes.Buffer
-	max      int
-	overflow bool
-}
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	if room := b.max - b.buf.Len(); room < len(p) {
-		b.overflow = true
-		if room > 0 {
-			b.buf.Write(p[:room])
-		}
-		return len(p), nil
-	}
-	return b.buf.Write(p)
-}
-
-func (b *limitedBuffer) Bytes() []byte  { return b.buf.Bytes() }
-func (b *limitedBuffer) String() string { return b.buf.String() }

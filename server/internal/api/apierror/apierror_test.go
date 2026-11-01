@@ -39,6 +39,7 @@ func TestConvert(t *testing.T) {
 		{"echo sentinel 413", echo.ErrStatusRequestEntityTooLarge, 413, gen.ErrorCodePayloadTooLarge, "Request Entity Too Large"},
 		{"echo sentinel 415", echo.ErrUnsupportedMediaType, 415, gen.ErrorCodeUnsupportedMediaType, "Unsupported Media Type"},
 		{"echo sentinel 429", echo.ErrTooManyRequests, 429, gen.ErrorCodeTooManyRequests, "Too Many Requests"},
+		{"api error 422", apierror.New(422, "video changes"), 422, gen.ErrorCodeUnprocessable, "video changes"},
 		{"echo sentinel 401", echo.ErrUnauthorized, 401, gen.ErrorCodeUnauthorized, "Unauthorized"},
 		{"echo sentinel 405", echo.ErrMethodNotAllowed, 405, gen.ErrorCodeMethodNotAllowed, "Method Not Allowed"},
 		{"echo http error with message", echo.NewHTTPError(400, "Invalid format for parameter id"), 400, gen.ErrorCodeBadRequest, "Invalid format for parameter id"},

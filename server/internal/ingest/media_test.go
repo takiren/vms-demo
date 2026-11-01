@@ -3,7 +3,6 @@ package ingest
 import (
 	"bytes"
 	"context"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,22 +26,6 @@ func TestParsePacketTimes(t *testing.T) {
 	}
 }
 
-func TestLimitedBuffer(t *testing.T) {
-	b := &limitedBuffer{max: 4}
-	if _, ok := any(b).(io.ReaderFrom); ok {
-		t.Fatal("limitedBuffer must not implement io.ReaderFrom (io.Copy would bypass the limit)")
-	}
-	if n, err := b.Write([]byte("ab")); n != 2 || err != nil {
-		t.Fatal(n, err)
-	}
-	if n, err := b.Write([]byte("cdef")); n != 4 || err != nil || !b.overflow || b.String() != "abcd" {
-		t.Fatalf("%d %v %v %q", n, err, b.overflow, b.String())
-	}
-	if _, err := b.Write([]byte("g")); err != nil || b.String() != "abcd" {
-		t.Fatal(err, b.String())
-	}
-}
-
 func TestTruncate(t *testing.T) {
 	if got := truncate("ok"); got != "ok" {
 		t.Errorf("truncate = %q", got)
@@ -54,16 +37,6 @@ func TestTruncate(t *testing.T) {
 	got := truncate(long)
 	if len(got) > maxErrorLength+len("…") || !strings.HasSuffix(got, "…") || !strings.HasPrefix(long, strings.TrimSuffix(got, "…")) {
 		t.Errorf("truncate long = %d bytes", len(got))
-	}
-}
-
-func TestChildEnvHasNoSecrets(t *testing.T) {
-	t.Setenv("S3_SECRET_ACCESS_KEY", "leak")
-	t.Setenv("VMS_HOOK_TOKEN", "leak")
-	for _, kv := range childEnv() {
-		if strings.Contains(kv, "leak") {
-			t.Errorf("child env contains %q", kv)
-		}
 	}
 }
 
