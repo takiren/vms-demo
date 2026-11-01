@@ -27,7 +27,9 @@ func TestRoundTrip(t *testing.T) {
 		if blob[0] != sealbox.Version1 {
 			t.Errorf("version byte = %d", blob[0])
 		}
-		if len(pt) > 0 && bytes.Contains(blob, pt) {
+		// Short plaintexts can appear in random bytes by chance; only check
+		// ones long enough for a match to mean the plaintext leaked.
+		if len(pt) >= 16 && bytes.Contains(blob, pt) {
 			t.Error("plaintext visible in blob")
 		}
 		got, err := b.Open(blob, []byte("camera:1"))
