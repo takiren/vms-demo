@@ -13,6 +13,7 @@ Go による API サーバーの実装ディレクトリです。
 - `internal/auth`: ユーザー、パスワード（argon2id）、セッション、ログインの回数制限
 - `internal/camera`: カメラの登録と検証、RTSP 認証情報の暗号化、MediaMTX に渡す source の組み立て
 - `internal/mediamtx`: MediaMTX の Control API のクライアントと、DB のカメラを path に反映する reconciler
+- `internal/liveauth`: MediaMTX の認証の問い合わせ（`authMethod: http`）の判定と、ライブ用トークンの発行・検証
 - `internal/sealbox`: AES-256-GCM による秘密情報の暗号化（DB に保存する認証情報など）
 - `internal/testutil/pgtest`: 結合テスト用に PostgreSQL のコンテナとテストごとの DB を用意する
 - `internal/testutil/garagetest`: 結合テスト用に Garage のコンテナ（layout、キー、バケット）を用意する
@@ -86,6 +87,7 @@ make dev        # air でホットリロードしながら起動する（../.env
 | `VMS_DISK_HIGH_WATERMARK` | | `90` | 録画ディレクトリのファイルシステムの使用率（%、`df` の Use%）がこれ以上でローカルのセグメントを消し始める（50〜99） |
 | `VMS_DISK_LOW_WATERMARK` | | HIGH − 5 | これを下回るまで消す（1 以上、HIGH 未満） |
 | `VMS_DISK_CHECK_INTERVAL` | | `30s` | 使用率を確かめる間隔（5s〜10m） |
+| `VMS_MEDIAMTX_AUTH_SECRET` | ○ | | MediaMTX が認証エンドポイントに名乗る Basic 認証のパスワード（16〜256 文字の `A-Z a-z 0-9 . _ ~ -`。`openssl rand -hex 32`）。MediaMTX 側は `authHTTPAddress` の userinfo に入れる |
 
 不正な値や `CHANGE_ME` のままの値があると、すべての問題を表示して起動しません。
 
@@ -133,7 +135,24 @@ curl -sk -b cookies -H "Origin: https://vms.localhost" -H "Content-Type: applica
 - 差分同期: `GET /v3/config/paths/list` と比べ、違うものだけ add / replace / delete する。`cam_` で始まらない path には触らない
 - 同期するのは、起動時、カメラの変更時、`VMS_MEDIAMTX_SYNC_INTERVAL` ごと（MediaMTX を再起動すると Control API で足した path は消えるため）。失敗したら 1 秒から間隔までの指数バックオフでやり直す。MediaMTX が落ちていても API は起動する
 - 認証情報を復号できないカメラ（`VMS_SECRET_KEY` を変えた、など）は、MediaMTX の path をそのままにしてエラーをログに出す
-- Control API には `VMS_MEDIAMTX_API_USER` / `VMS_MEDIAMTX_API_PASSWORD` の Basic 認証で名乗る。MediaMTX は `authMethod: http` でこれを API の認証エンドポイント（#10）に問い合わせる。そのエンドポイントができるまでは、同期は 401 で失敗し続ける
+- Control API には `VMS_MEDIAMTX_API_USER` / `VMS_MEDIAMTX_API_PASSWORD` の Basic 認証で名乗る。MediaMTX は `authMethod: http` でこれを API の認証エンドポイントに問い合わせ、API はこの組にだけ `action: api` を許可する
+
+### MediaMTX の認証とライブ用トークン
+
+設計は `docs/design.md` の「MediaMTX からの問い合わせ」と「ライブ用トークン」。
+
+- `POST /api/internal/mediamtx/auth`: MediaMTX がすべての操作を問い合わせる。許可は 200、拒否は 403（理由を本文と API のログに出す。パスワード、トークン、クエリは出さない）
+  - 呼び出しには Basic 認証（`mediamtx` / `VMS_MEDIAMTX_AUTH_SECRET`）が要る。違えば 401、接続元 IP ごとに 15 分に 30 回失敗すると 429。Cookie は見ない
+  - 許可するのは、`api` を Control API の認証情報で、`read` を WebRTC / HLS とライブ用トークンで、有効なカメラの path に対して、だけ。`publish` などは拒否
+- `POST /api/live/token`（viewer）: ライブ用トークン（5 分）を返す。ブラウザは `Authorization: Bearer <token>` か HLS の `?token=<token>` で MediaMTX に渡す。トークンは発行したセッションに結び付き、ログアウトなどでセッションが消えると使えない
+- 手で試すとき（開発環境。カメラを登録して同期した後）
+
+```sh
+tok=$(curl -sk -b cookies -X POST -H "Origin: https://vms.localhost" https://vms.localhost/api/live/token | jq -r .token)
+curl -sk -o /dev/null -w '%{http_code}\n' -X OPTIONS -H "Authorization: Bearer $tok" \
+  https://vms.localhost/live/webrtc/cam_<camera_id>_sub/whep   # 204
+```
+
 ## 録画の取り込み
 
 設計は `docs/design.md` の「録画パイプライン」。

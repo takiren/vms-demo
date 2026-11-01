@@ -235,6 +235,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/live/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * ライブ用のトークンを発行する
+         * @description MediaMTX（`/live/webrtc/`、`/live/hls/`）で配信を見るための短命のトークン（5 分）。
+         *     ブラウザのセッション Cookie は MediaMTX から API に渡らないので、代わりにこれを
+         *     `Authorization: Bearer <token>`（reader.js の `token`、hls.js の `xhrSetup`）か、
+         *     HLS の `?token=<token>` で MediaMTX に渡す。
+         *     トークンはこのセッションに結び付く。ログアウトなどでセッションが消えると使えなくなる。
+         *     期限が切れる前に取り直すこと（docs/design.md の「ライブ用トークン」）。
+         */
+        post: operations["issueLiveToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/mediamtx/auth": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * MediaMTX の認証の問い合わせ（authMethod は http）
+         * @description MediaMTX がすべての操作をここに問い合わせる。2xx なら許可、それ以外なら拒否。既定で拒否する。
+         *     - `api`: `VMS_MEDIAMTX_API_USER` / `VMS_MEDIAMTX_API_PASSWORD` の組だけ許可
+         *     - `read`: WebRTC / HLS で、有効なライブ用トークン（`token` か `query` の `token`）があり、
+         *       path が有効なカメラのものなら許可。Basic 認証（`user` / `password`）では許可しない
+         *     - `publish`、`playback`、`metrics`、`pprof`: 拒否
+         *     MediaMTX は Basic 認証（ユーザー `mediamtx`、パスワード `VMS_MEDIAMTX_AUTH_SECRET`）で名乗る。
+         *     違えば 401、失敗が多すぎれば 429。Caddy は `/api/internal/` を外から遮断する。
+         */
+        post: operations["mediamtxAuth"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -366,6 +417,47 @@ export interface components {
          * @enum {string}
          */
         ErrorCode: "bad_request" | "unauthorized" | "forbidden" | "not_found" | "method_not_allowed" | "conflict" | "payload_too_large" | "unsupported_media_type" | "too_many_requests" | "internal" | "service_unavailable";
+        LiveToken: {
+            /**
+             * @description base64url（パディングなし）の不透明な文字列。中身を解釈しないこと。
+             *     URL のクエリにそのまま入れられる（`:` を含まない）
+             */
+            token: string;
+            /**
+             * Format: date-time
+             * @description これより後は使えない。その前に取り直す
+             */
+            expires_at: string;
+        };
+        /**
+         * @description MediaMTX（v1.21）が送る本文。知らない項目は無視する（MediaMTX の更新で増えることがある）。
+         *     `password` と `token` には秘密が入るので、ログに出さない。`query` にもトークンが入りうる。
+         */
+        MediaMTXAuthRequest: {
+            /** @description MediaMTX に接続してきたクライアントの IP */
+            ip?: string;
+            user?: string;
+            password?: string;
+            /** @description `Authorization: Bearer` のトークン。Bearer がなければ MediaMTX は Basic のパスワードを入れる */
+            token?: string;
+            /** @description publish / read / playback / api / metrics / pprof（知らない値は拒否） */
+            action: string;
+            path?: string;
+            /** @description rtsp / rtmp / hls / webrtc / srt / moq。api などでは空 */
+            protocol?: string;
+            /** @description MediaMTX のセッションの ID。ないときは null */
+            id?: string | null;
+            /** @description 生のクエリ文字列（`?` なし） */
+            query?: string;
+            userAgent?: string;
+        };
+        MediaMTXAuthResult: {
+            /**
+             * Format: date-time
+             * @description MediaMTX はこの時刻に配信を切る（read のとき）
+             */
+            expireAt?: string;
+        };
     };
     responses: {
         /**
@@ -783,6 +875,60 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    issueLiveToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 発行した */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LiveToken"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    mediamtxAuth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MediaMTXAuthRequest"];
+            };
+        };
+        responses: {
+            /** @description 許可する */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MediaMTXAuthResult"];
+                };
+            };
+            /** @description 拒否する */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
             };
             default: components["responses"]["Error"];
         };

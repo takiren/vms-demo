@@ -8,6 +8,8 @@ logLevel: info
 # 認証: すべての操作（read / publish / api / ...）を Go API に問い合わせる。
 # Control API の action: api も除外しない。API は Basic 認証で自分自身を名乗り、
 # 判定エンドポイントが許可する（README 参照）。
+# 問い合わせ先は compose が MTX_AUTHHTTPADDRESS で上書きする。API は MediaMTX にも Basic 認証を求めるので
+# （userinfo に VMS_MEDIAMTX_AUTH_SECRET）、この既定値のままではすべて拒否される
 authMethod: http
 authHTTPAddress: http://host.docker.internal:8080/api/internal/mediamtx/auth
 authHTTPExclude: []

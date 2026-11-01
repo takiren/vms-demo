@@ -31,6 +31,7 @@ import (
 	"github.com/takiren/vms-demo/server/internal/camera"
 	"github.com/takiren/vms-demo/server/internal/config"
 	"github.com/takiren/vms-demo/server/internal/db"
+	"github.com/takiren/vms-demo/server/internal/liveauth"
 	"github.com/takiren/vms-demo/server/internal/mediamtx"
 )
 
@@ -156,6 +157,17 @@ func serve() error {
 	} else {
 		logger.Warn("the retention job is disabled (object storage is not configured)")
 	}
+	live, err := liveauth.New(liveauth.Config{
+		APIUser:        cfg.MediaMTXAPIUser,
+		APIPassword:    cfg.MediaMTXAPIPassword.Value(),
+		EndpointSecret: cfg.MediaMTXAuthSecret.Value(),
+		SecretKey:      cfg.SecretKey.Bytes(),
+		Sessions:       svc,
+		Cameras:        cams,
+	})
+	if err != nil {
+		return err
+	}
 
 	e, err := api.New(logger, api.Options{
 		Auth:           svc,
@@ -164,6 +176,7 @@ func serve() error {
 		Cameras:        cams,
 		HookToken:      cfg.Ingest.HookToken.Value(),
 		Ingest:         ingestAPI,
+		Live:           live,
 	})
 	if err != nil {
 		return err

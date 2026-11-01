@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v5"
@@ -68,7 +70,7 @@ func sameOrigin(req *http.Request, publicOrigin string) bool {
 // authenticate resolves the session cookie into the request context and
 // enforces the operation's policy (default deny). It runs after routing:
 // requests that match no route pass through so Echo answers 404/405.
-func authenticate(policies *authz.Table, svc AuthService, hook hookAuth, logger *slog.Logger) echo.MiddlewareFunc {
+func authenticate(policies *authz.Table, svc AuthService, hook hookAuth, live LiveAuthService, logger *slog.Logger) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			ri := c.RouteInfo()
@@ -79,12 +81,30 @@ func authenticate(policies *authz.Table, svc AuthService, hook hookAuth, logger 
 			if !ok {
 				return apierror.New(http.StatusForbidden, "access denied")
 			}
-			if policy.HookToken {
-				// Server-to-server: the shared secret only, never a session.
-				return hook.authenticate(c, next)
+			req := c.Request()
+			if policy.Internal() {
+				// Server-to-server: the scheme's own credentials only. The
+				// session cookie is never looked at.
+				passed := func(c *echo.Context) error {
+					r := c.Request()
+					c.SetRequest(r.WithContext(context.WithValue(r.Context(), internalCallerKey{}, policy.Scheme)))
+					return next(c)
+				}
+				switch policy.Scheme {
+				case authz.SchemeMediaMTX:
+					if err := authenticateMediaMTX(c, live); err != nil {
+						return err
+					}
+					return passed(c)
+				case authz.SchemeHookToken:
+					// The shared secret (X-VMS-Hook-Token) only.
+					return hook.authenticate(c, passed)
+				default:
+					// An internal scheme without a check here is never open.
+					return apierror.New(http.StatusForbidden, "access denied")
+				}
 			}
 
-			req := c.Request()
 			var user *auth.User
 			staleCookie := false
 			if ck, err := req.Cookie(auth.CookieName); err == nil && ck.Value != "" {
@@ -134,8 +154,8 @@ func strictAuthorize(policies *authz.Table) gen.StrictMiddlewareFunc {
 			if !ok {
 				return nil, apierror.New(http.StatusForbidden, "access denied")
 			}
-			if policy.HookToken {
-				if !hookAuthenticated(c.Request().Context()) {
+			if policy.Internal() {
+				if !isInternalCaller(c.Request().Context(), policy.Scheme) {
 					return nil, apierror.New(http.StatusUnauthorized, "authentication required")
 				}
 				return f(c, request)
@@ -150,4 +170,33 @@ func strictAuthorize(policies *authz.Table) gen.StrictMiddlewareFunc {
 			return f(c, request)
 		}
 	}
+}
+
+// internalCallerKey carries the internal scheme whose credentials the
+// request passed.
+type internalCallerKey struct{}
+
+func isInternalCaller(ctx context.Context, scheme string) bool {
+	got, _ := ctx.Value(internalCallerKey{}).(string)
+	return got != "" && got == scheme
+}
+
+// authenticateMediaMTX checks the Basic credentials MediaMTX sends (the
+// userinfo of its authHTTPAddress). Without a LiveAuthService every caller
+// is rejected.
+func authenticateMediaMTX(c *echo.Context, live LiveAuthService) error {
+	if live == nil {
+		return apierror.New(http.StatusUnauthorized, "authentication required")
+	}
+	req := c.Request()
+	user, password, ok := req.BasicAuth()
+	err := live.AuthenticateCaller(user, password, ok, clientip.FromContext(req.Context()))
+	if rl, isRL := errors.AsType[*auth.RateLimitedError](err); isRL {
+		c.Response().Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(rl)))
+		return apierror.New(http.StatusTooManyRequests, "too many failed attempts; try again later")
+	}
+	if err != nil {
+		return apierror.New(http.StatusUnauthorized, "authentication required")
+	}
+	return nil
 }

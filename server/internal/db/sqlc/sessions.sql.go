@@ -104,6 +104,40 @@ func (q *Queries) DeleteSessionsByUser(ctx context.Context, userID uuid.UUID) (i
 	return result.RowsAffected(), nil
 }
 
+const getSessionByID = `-- name: GetSessionByID :one
+SELECT sessions.id, sessions.user_id, sessions.token_hash, sessions.created_at, sessions.expires_at, sessions.last_seen_at, users.id, users.username, users.password_hash, users.role, users.created_at, users.updated_at
+FROM sessions
+JOIN users ON users.id = sessions.user_id
+WHERE sessions.id = $1
+  AND sessions.expires_at > now()
+`
+
+type GetSessionByIDRow struct {
+	Session Session
+	User    User
+}
+
+// GetSessionByID は期限内のセッションを ID で、ユーザーと一緒に返す（ライブ用トークンの検証用。延長はしない）。
+func (q *Queries) GetSessionByID(ctx context.Context, id uuid.UUID) (GetSessionByIDRow, error) {
+	row := q.db.QueryRow(ctx, getSessionByID, id)
+	var i GetSessionByIDRow
+	err := row.Scan(
+		&i.Session.ID,
+		&i.Session.UserID,
+		&i.Session.TokenHash,
+		&i.Session.CreatedAt,
+		&i.Session.ExpiresAt,
+		&i.Session.LastSeenAt,
+		&i.User.ID,
+		&i.User.Username,
+		&i.User.PasswordHash,
+		&i.User.Role,
+		&i.User.CreatedAt,
+		&i.User.UpdatedAt,
+	)
+	return i, err
+}
+
 const getSessionByTokenHash = `-- name: GetSessionByTokenHash :one
 SELECT sessions.id, sessions.user_id, sessions.token_hash, sessions.created_at, sessions.expires_at, sessions.last_seen_at, users.id, users.username, users.password_hash, users.role, users.created_at, users.updated_at
 FROM sessions

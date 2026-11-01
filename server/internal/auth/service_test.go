@@ -593,3 +593,54 @@ func TestResetPassword(t *testing.T) {
 		t.Errorf("weak = %v", err)
 	}
 }
+
+func TestSessionByID(t *testing.T) {
+	svc, pool := newService(t)
+	ctx := t.Context()
+	bob := mustCreate(t, svc, "bob", auth.RoleViewer)
+	p, err := svc.Authenticate(ctx, mustLogin(t, svc, "bob", pw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, exp, err := svc.SessionByID(ctx, p.SessionID)
+	if err != nil || got.User.ID != bob.ID || got.User.Role != auth.RoleViewer || got.SessionID != p.SessionID {
+		t.Fatalf("SessionByID = %+v, %v", got, err)
+	}
+	if d := time.Until(exp); d < auth.DefaultIdleTimeout-time.Minute || d > auth.DefaultIdleTimeout+time.Minute {
+		t.Errorf("expiry in %v", d)
+	}
+
+	// Looking a session up does not extend it.
+	var before, after time.Time
+	_ = pool.QueryRow(ctx, "UPDATE sessions SET last_seen_at = now() - interval '1 hour' WHERE id = $1 RETURNING last_seen_at", p.SessionID).Scan(&before)
+	if _, _, err := svc.SessionByID(ctx, p.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	_ = pool.QueryRow(ctx, "SELECT last_seen_at FROM sessions WHERE id = $1", p.SessionID).Scan(&after)
+	if !after.Equal(before) {
+		t.Errorf("SessionByID touched the session: %v -> %v", before, after)
+	}
+
+	// Expired, unknown and revoked sessions are gone.
+	if _, _, err := svc.SessionByID(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, auth.ErrUnauthenticated) {
+		t.Errorf("unknown: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE sessions SET expires_at = now() - interval '1 second', created_at = now() - interval '1 hour' WHERE id = $1", p.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.SessionByID(ctx, p.SessionID); !errors.Is(err, auth.ErrUnauthenticated) {
+		t.Errorf("expired: %v", err)
+	}
+	p2, err := svc.Authenticate(ctx, mustLogin(t, svc, "bob", pw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := auth.RoleAdmin
+	if _, err := svc.UpdateUser(ctx, bob.ID, auth.UserUpdate{Role: &role}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.SessionByID(ctx, p2.SessionID); !errors.Is(err, auth.ErrUnauthenticated) {
+		t.Errorf("after role change: %v", err)
+	}
+}

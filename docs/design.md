@@ -44,7 +44,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
   - API は Control API に Basic 認証（`VMS_MEDIAMTX_API_USER` / `VMS_MEDIAMTX_API_PASSWORD`）で名乗る。MediaMTX はこれを `authMethod: http` で API に問い合わせ、API はこの組にだけ `action: api` を許可する
 - `mediamtx.yml` には全体設定だけを書く。path の定義は書かない
 - 録画: `recordFormat: fmp4`、`recordSegmentDuration: 1m`。main だけを録る
-- 認証: `authMethod: http` で Go API に問い合わせる
+- 認証: `authMethod: http` で Go API に問い合わせる（「認証」の「MediaMTX からの問い合わせ」）
 - セグメントが完了したら `runOnRecordSegmentComplete` で API に通知する
   - 公式イメージには curl が入っていないので、curl 入りのイメージを自前でビルドする
 
@@ -160,7 +160,7 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 
 - ログインはセッション Cookie（HttpOnly）
 - ロールは `admin` と `viewer`
-- ライブの閲覧は、MediaMTX からの問い合わせに API が判定する
+- ライブの閲覧は、MediaMTX からの問い合わせに API が判定する（「MediaMTX からの問い合わせ」「ライブ用トークン」）
 
 ### セッション
 
@@ -200,14 +200,52 @@ Camera ──RTSP──> MediaMTX ──fMP4──> 共有ボリューム ──
 
 - `SameSite=Strict` に加えて、状態を変えるメソッド（GET / HEAD / OPTIONS 以外）では、`Origin` が公開オリジン（`https://<VMS_HOST>`、`VMS_PUBLIC_ORIGIN` で上書きできる）と一致することを求める。`Origin` がなければ `Sec-Fetch-Site: same-origin` を求める。どちらもなければ 403
   - ログインにも適用する（ログイン CSRF の防止）。curl などで叩くときは `Origin` ヘッダーを付ける
-  - `/api/internal/` 以下（MediaMTX からの呼び出し。後の issue）は対象外にして、別の方法で認証する
+  - `/api/internal/` 以下（MediaMTX からの呼び出し）は対象外にして、別の方法で認証する（OpenAPI の security scheme をそれぞれに定義する）
+
+### MediaMTX からの問い合わせ
+
+- `POST /api/internal/mediamtx/auth`。MediaMTX の `authMethod: http` が、すべての操作（`read` / `publish` / `api` など）をここに問い合わせる。MediaMTX は 2xx なら許可、それ以外なら拒否する
+  - 許可は 200。拒否は 403。エンドポイント自体の認証に失敗したら 401、失敗が多すぎたら 429
+- エンドポイント自体も認証する（Caddy で外から遮断しているが、開発ではホストの :8080 に LAN から届きうる）
+  - MediaMTX は Basic 認証（ユーザー `mediamtx`、パスワード `VMS_MEDIAMTX_AUTH_SECRET`）で名乗る。`authHTTPAddress` の URL の userinfo に入れる（`http://mediamtx:<secret>@api:8080/api/internal/mediamtx/auth`）。Go の HTTP クライアント（MediaMTX）は userinfo を `Authorization: Basic` で送り、エラーのメッセージでは伏せる。クエリ（`?secret=`）には入れない（MediaMTX のエラーログに URL がそのまま出るため）
+  - 比較は定数時間。OpenAPI の security scheme は `mediamtxAuth`（内部の方式。「認可」を参照）
+- 判定は既定で拒否。許可するのは次の 2 つだけ
+
+| action | 判定 |
+|---|---|
+| `api` | `user` と `password` が `VMS_MEDIAMTX_API_USER` / `VMS_MEDIAMTX_API_PASSWORD` と一致するときだけ許可（両方を定数時間で比較する）。MediaMTX は Basic のパスワードを `token` にも入れるので、`token` は見ない |
+| `read` | 次をすべて満たすときだけ許可: `protocol` が `webrtc` か `hls`、`user` と `password` が空（Basic 認証では見られない）、ライブ用トークン（下記）が有効、`path` が存在して有効なカメラの `cam_<uuid>_main`（sub があれば `_sub` も） |
+| `publish` | 拒否。カメラもテスト映像も MediaMTX が RTSP のクライアントとして取りに行く（pull）ので、MediaMTX に publish するものはない |
+| `playback`、`metrics`、`pprof`、それ以外 | 拒否（`mediamtx.yml` でも無効） |
+
+- 失敗の回数制限: 接続元 IP ごとに 15 分に 30 回（ログインと同じ数え方）。エンドポイントの Basic 認証の失敗は HTTP の接続元で、`action: api` の失敗は問い合わせの `ip`（MediaMTX に接続してきたもの）で数える。超えたら、窓が明けるまで正しい認証情報でも拒否する
+  - 同じ IP から総当たりされると、API の Control API の呼び出しも最長 15 分止まる（MediaMTX の path はそのまま残るので、録画は止まらない）
+- 判定の理由はログに出す（action、protocol、path、理由）。パスワード、トークン、クエリはログに出さない
+
+### ライブ用トークン
+
+- MediaMTX の問い合わせには、ブラウザのセッション Cookie が入らない。そこで API が短命のトークンを発行し、ブラウザはそれを MediaMTX に渡す
+- `POST /api/live/token`（viewer。Cookie と CSRF の確認は通常どおり）が `{"token": "...", "expires_at": "..."}` を返す。有効期限は 5 分
+- 形式: `base64url（パディングなし）(バージョン 1 バイト（今は 1）|| セッション ID 16 バイト || ユーザー ID 16 バイト || 期限（Unix 秒、8 バイト）|| HMAC-SHA256 32 バイト)`
+  - 鍵は `VMS_SECRET_KEY` から HKDF-SHA256（info `vms-demo live token v1`）で導出する（暗号化の鍵と分ける）。トークンは DB に保存しない。API を再起動しても（開発のホットリロードでも）有効なまま
+  - path には縛らない。そのユーザーが見られるカメラすべてに使える。判定は問い合わせのたびに path ごとに行うので、カメラ単位の権限（Phase 2）もそこで足せる
+- 検証: MAC（定数時間）、期限、セッションが有効（ログアウト、パスワードやロールの変更、ユーザーの削除で消えたセッションなら拒否）でユーザーが一致すること、ロールが viewer 以上であること。検証ではセッションを延長しない
+- MediaMTX が問い合わせるのは接続するときだけ（WebRTC は WHEP の `OPTIONS` と `POST`、HLS は最初の `index.m3u8` でセッションを作るとき）。接続した後は、トークンの期限が切れても配信は続く
+  - 許可の応答に `{"expireAt": ...}` を入れる。MediaMTX はその時刻に配信を切る。値は「セッションの期限」と「1 時間後」の早いほう。ログアウトなどの取り消しが、接続中の配信に効くまでの最長時間になる
+- クライアントの約束（#16 のライブ画面）
+  - 配信の URL は `/live/webrtc/<path>/whep`（WebRTC）と `/live/hls/<path>/index.m3u8`（HLS）。`<path>` は `cam_<camera_id>_sub`（多分割）か `cam_<camera_id>_main`（単画面）
+  - WebRTC: `reader.js` の `token` に入れる（`Authorization: Bearer <token>` で送られる）。`reader.js` は再接続のたびに conf オブジェクトの `token` を読み直すので、期限が切れる前（例えば 4 分ごと）に新しいトークンで `conf.token` を書き換える。`user` / `pass` は使わない
+  - HLS（hls.js）: `xhrSetup`（または `fetchSetup`）で `Authorization: Bearer <token>` を付ける。ヘッダーを付けられないときは `index.m3u8?token=<token>`（MediaMTX は `query` に入れて問い合わせる）。最初の `index.m3u8` は `?cookieCheck=1` へのリダイレクトになるが、クエリは引き継がれる
+  - トークンは必ず送る。何も送らないと MediaMTX は `WWW-Authenticate: Basic` を付けて 401 を返し、ブラウザが認証のダイアログを出すことがある
+  - 再接続が 401 になったら、トークンを取り直してやり直す（期限切れ、`expireAt` で切られた、セッションが切れた）。トークンの取得自体が 401 なら、ログイン画面に戻す
 
 ### 認可
 
 - 既定で拒否する。OpenAPI の `security` を操作ごとに強制する
   - 全体の既定は `security: [cookieAuth: []]`。認証の要らない操作（`healthz`、ログイン、ログアウト）だけ `security: []` で外す
   - 認証が要る操作には、必要な最低ロールを `x-min-role`（`admin` か `viewer`）で必ず書く。`viewer` はログインしていれば誰でもよい
-  - 認証の要らない操作に `x-min-role` を書いたもの、認証が要る操作で `x-min-role` がないもの、`cookieAuth` 以外の方式のものがあれば、API は起動しない
+  - 認証の要らない操作に `x-min-role` を書いたもの、認証が要る操作で `x-min-role` がないもの、知らない方式のものがあれば、API は起動しない
+  - サーバー間の呼び出し用の方式（内部の方式。今は `mediamtxAuth` と `hookToken`。authz の `InternalSchemes` に並べる）は `/internal/` の操作だけが使え、スコープも `x-min-role` も付けない。セッションでは満たせない。`/internal/` の操作は内部の方式をちょうど 1 つ使う（`cookieAuth` や `security: []` は不可。`/internal/` は CSRF の確認をしないため）。外れたものがあれば API は起動しない
 - 判定はミドルウェアで行い、ハンドラでは行わない
   - Echo のルート（メソッドとパスのパターン）から操作を引き、リクエストの検証より前に判定する（未認証は 401、ロール不足は 403）
   - 念のため strict-server のミドルウェアでも、操作 ID で同じ判定をする。表にない操作は拒否する

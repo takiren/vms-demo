@@ -33,7 +33,7 @@ docker compose up         # リポジトリ直下で。初回は ffmpeg のビ�
 |---|---|
 | `https://vms.localhost/` | web（ホストの vite dev、`:5173`） |
 | `https://vms.localhost/api/...` | API（ホストの `:8080`）。`/api` は外さずに渡す |
-| `https://vms.localhost/api/internal/...` | Caddy が 404 を返す（MediaMTX → API 専用。MediaMTX は Caddy を通さず API を呼ぶ） |
+| `https://vms.localhost/api/internal/...` | Caddy が 404 を返す（MediaMTX → API 専用。MediaMTX は Caddy を通さず、`VMS_MEDIAMTX_AUTH_SECRET` の Basic 認証で API を呼ぶ） |
 | `https://vms.localhost/live/hls/<path>/index.m3u8` | MediaMTX の LL-HLS（`:8888`） |
 | `https://vms.localhost/live/webrtc/<path>/whep` | MediaMTX の WebRTC（`:8889`）。`reader.js` も同じ下にある |
 | `https://s3.vms.localhost/recordings/...` | Garage の S3 API（presigned URL で取得する） |
@@ -103,4 +103,4 @@ deploy/smoke.sh     # 終わったら docker compose down -v する（SMOKE_KEEP
 
 ホストの :8080 で API のスタブ（`smoke/stub-api.py`）を動かし、次を確かめます。
 Postgres（`uuidv7()`）、garage-init の 2 回目の実行、presigned URL の PUT / GET（Caddy の `s3.<host>` 経由）、CORS（自オリジンだけ）、
-`/api` と `/api/internal` のブロック、公開していないポート、テスト映像の取り込み（Control API の `ready`）、`/live/hls` と `/live/webrtc`、録画の書き込みとホストからの削除、セグメント完了の通知。
+`/api` と `/api/internal` のブロック、公開していないポート、テスト映像の取り込み（Control API の `ready`）、`/live/hls` と `/live/webrtc`、録画の書き込みとホストからの削除、セグメント完了の通知、MediaMTX が認証エンドポイントに `VMS_MEDIAMTX_AUTH_SECRET` で名乗ること（スタブが確かめる）。
